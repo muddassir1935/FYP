@@ -76,6 +76,7 @@ FYP/
 ├── AGENTS.md                       # Directives for AI coding assistants
 │
 ├── docs/                           # Comprehensive technical documentation
+│   ├── git_and_engineering_workflow.md # Git branching, commit format & integration rules
 │   ├── architecture_deep_dive.md   # In-depth component analysis (Input -> Process -> Output)
 │   ├── project_decisions.md        # Technical trade-off matrix & choices
 │   ├── roadmap_wbs.md              # 10-Month milestone schedule & dates
@@ -108,6 +109,20 @@ FYP/
 
 ---
 
+## 🌿 Engineering Workflow & Contribution Standards
+
+To maintain production stability, all team members and AI assistants follow these strict rules (detailed in [docs/git_and_engineering_workflow.md](./docs/git_and_engineering_workflow.md)):
+
+1. **Never Commit Directly to `main`**:
+   * Create a feature branch before writing code: `git checkout -b feature/<name>`.
+2. **Human-Grade Conventional Commits (No AI Fluff)**:
+   * Format: `<type>(<scope>): <summary in imperative mood, max 72 chars>`.
+   * Example: `feat(data): add negative background sample generator for weapon dataset`.
+3. **Verify Locally**:
+   * Run standalone scripts and test frame rates before merging into `main`.
+
+---
+
 ## 🚀 Quickstart & Setup Guide
 
 ### 1. Clone the Repository
@@ -125,7 +140,6 @@ python -m venv venv
 source venv/bin/activate
 
 pip install --upgrade pip
-# Install core dependencies (PyTorch, Ultralytics, FastAPI, OpenCV)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install ultralytics fastapi uvicorn[standard] opencv-python sqlalchemy websockets
 ```
@@ -141,15 +155,15 @@ npm run dev
 
 ## 👥 FYP Team
 
-* **Muddassir Rizwan** — *ML/AI Model Development (Lead)*  
+* **Muddassir Rizwan** (`23K-0784`) — *ML/AI Model Development (Lead)*  
   Fine-tuning YOLOv8s, YOLOv8m-Pose extraction, 2-Layer LSTM modeling, hyperparameter optimization.
-* **Faiz Hussain** — *Backend & Systems Pipeline*  
+* **Faiz Hussain** (`23K-2061`) — *Backend & Systems Pipeline*  
   OpenCV RTSP video ingestion, Temporal Consistency Buffer, FastAPI backend, WebSockets.
-* **Qaim Mehdi** — *Frontend Dashboard & UI*  
+* **Qaim Mehdi** (`23K-2075`) — *Frontend Dashboard & UI*  
   React + Vite dashboard, HTML5 Canvas GPU rendering, alert audio sirens, incident logging UI.
 
 ---
 
 ## 📄 License & Academic Usage
 
-This project is developed as an academic Final Year Project (FYP). All rights reserved by the project team.
+This project is developed as an academic Final Year Project (FYP) at **FAST-NUCES Karachi Campus**. All rights reserved by the project team.
