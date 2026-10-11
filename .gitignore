@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # SENTINEL FYP — Git Ignore Configuration
 # ==============================================================================
 
@@ -54,10 +54,14 @@ DataSets/raw/*
 !DataSets/raw/.gitkeep
 DataSets/curated/*
 !DataSets/curated/.gitkeep
+!DataSets/curated/weapon_yolo/
+DataSets/curated/weapon_yolo/*
+!DataSets/curated/weapon_yolo/dataset.yaml
 DataSets/downloads/
 DataSets/UCF-Crime/
 DataSets/RWF-2000/
 DataSets/Kaggle-Weapons/
+raw_datasets/
 *.npy
 *.npz
 
