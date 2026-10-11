@@ -1,0 +1,8 @@
+path: C:/FYP-1/DataSets/curated/weapon_yolo
+train: images/train
+val: images/val
+test: images/test
+nc: 2
+names:
+  0: Gun
+  1: Knife
