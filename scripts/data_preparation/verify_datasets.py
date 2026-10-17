@@ -145,13 +145,35 @@ def generate_weapon_preview(save_path: Path, num_samples: int = 6) -> bool:
         logger.warning("No weapon images found to generate preview.")
         return False
 
+    gun_images = []
+    knife_images = []
+    bg_images = []
+    for img_p in all_images:
+        lbl_p = img_p.parent.parent.parent / "labels" / img_p.parent.name / f"{img_p.stem}.txt"
+        if not lbl_p.exists() or lbl_p.stat().st_size == 0:
+            bg_images.append(img_p)
+        else:
+            first_line = lbl_p.read_text(encoding="utf-8").strip().splitlines()[0]
+            if first_line.startswith("0"):
+                gun_images.append(img_p)
+            elif first_line.startswith("1"):
+                knife_images.append(img_p)
+
+    selected: List[Path] = []
     random.seed(42)
-    selected = random.sample(all_images, min(num_samples, len(all_images)))
+    if gun_images:
+        selected.extend(random.sample(gun_images, min(2, len(gun_images))))
+    if knife_images:
+        selected.extend(random.sample(knife_images, min(2, len(knife_images))))
+    if bg_images:
+        selected.extend(random.sample(bg_images, min(2, len(bg_images))))
+    while len(selected) < num_samples and all_images:
+        selected.append(random.choice(all_images))
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     axes = axes.flatten()
 
-    for idx, img_p in enumerate(selected):
+    for idx, img_p in enumerate(selected[:num_samples]):
         ax = axes[idx]
         img = cv2.imread(str(img_p))
         if img is None:
@@ -216,8 +238,18 @@ def generate_pose_preview(save_path: Path, num_samples: int = 5) -> bool:
         logger.warning("No pose .npy files found to generate preview.")
         return False
 
-    random.seed(42)
-    selected = random.sample(all_npy, min(num_samples, len(all_npy)))
+    # Balanced selection: normal, fighting, robbery, shooting, plus one mirrored
+    selected: List[Tuple[str, Path]] = []
+    for cname in ("normal", "fighting", "robbery", "shooting"):
+        c_files = [f for (c, f) in all_npy if c == cname and not f.stem.endswith("_flipped") and not f.stem.endswith("_jitter")]
+        if c_files:
+            selected.append((cname, c_files[0]))
+    flipped_files = [(c, f) for (c, f) in all_npy if f.stem.endswith("_flipped")]
+    if flipped_files:
+        selected.append((f"{flipped_files[0][0]} (Mirror)", flipped_files[0][1]))
+
+    while len(selected) < num_samples and all_npy:
+        selected.append(random.choice(all_npy))
 
     fig, axes = plt.subplots(1, len(selected), figsize=(4 * len(selected), 5))
     if len(selected) == 1:

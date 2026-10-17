@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
 """
-SENTINEL — Weapon Detection Preprocessing Pipeline (YOLOv8s)
-============================================================
-Harmonizes heterogeneous Kaggle weapon datasets into an Ultralytics YOLO
-2-class format (Gun: 0, Knife: 1) with ~15% negative background sampling,
-bounding box normalization/validation, and anti-leakage splitting.
+SENTINEL — Weapon Detection Preprocessing & Augmentation Pipeline (YOLOv8s)
+==========================================================================
+Harmonizes heterogeneous Kaggle weapon datasets and supplementary knife datasets
+into an Ultralytics YOLO 2-class format (Gun: 0, Knife: 1) with:
+  - Supplementary knife ingestion (mapping strictly to Class 1)
+  - Geometric (horizontal flip, random rotation +-10° to +-15°) and
+    photometric (HSV jitter, Gaussian/motion blur) offline knife augmentations
+  - Scaling knives to 1,200 – 1,500 total instances (~20-25% positive ratio)
+  - ~15% negative background sampling for false-alarm mitigation
+  - Coordinate normalization, boundary validation, and degenerate box filtering
+  - Stratified 70% / 20% / 10% anti-leakage splitting
 
 Author: SENTINEL Project Team (Qaim Mehdi / Muddassir Rizwan / Faiz Hussain)
 FAST-NUCES Karachi Campus
 """
 
 import argparse
+import csv
 import logging
 import os
 import random
@@ -69,15 +76,15 @@ OUT_OF_SCOPE = {
 
 # Metadata.csv target mapping for weapon_source_A
 SOURCE_A_TARGETS: Dict[int, Optional[int]] = {
-    0: 0,  # Automatic Rifle -> Gun (0)
+    0: 0,     # Automatic Rifle -> Gun (0)
     1: None,  # Bazooka -> Out of scope (discard)
     2: None,  # Grenade Launcher -> Out of scope (discard)
-    3: 0,  # Handgun -> Gun (0)
-    4: 1,  # Knife -> Knife (1)
-    5: 0,  # Shotgun -> Gun (0)
-    6: 0,  # SMG -> Gun (0)
-    7: 0,  # Sniper -> Gun (0)
-    8: 1,  # Sword -> Knife (1)
+    3: 0,     # Handgun -> Gun (0)
+    4: 1,     # Knife -> Knife (1)
+    5: 0,     # Shotgun -> Gun (0)
+    6: 0,     # SMG -> Gun (0)
+    7: 0,     # Sniper -> Gun (0)
+    8: 1,     # Sword -> Knife (1)
 }
 
 # Configure Logging
@@ -131,7 +138,6 @@ def validate_and_harmonize_bbox(
     if len(parts) < 5:
         return None
     try:
-        # Extract coordinates
         x, y, w, h = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
     except ValueError:
         return None
@@ -168,6 +174,9 @@ def validate_and_harmonize_bbox(
     return f"{target_class_id} {x:.6f} {y:.6f} {w:.6f} {h:.6f}"
 
 
+# ==============================================================================
+# Ingestion from Heterogeneous Sources
+# ==============================================================================
 def collect_source_a_samples() -> List[Dict]:
     """Collect samples from weapon_source_A using metadata.csv."""
     source_dir = RAW_DIR / "source_A"
@@ -182,11 +191,7 @@ def collect_source_a_samples() -> List[Dict]:
         logger.warning("metadata.csv not found at %s", metadata_path)
         return []
 
-    import csv
-
     samples: List[Dict] = []
-
-    # Build index of all files in source_dir for fast lookup
     file_map: Dict[str, Path] = {}
     for p in source_dir.rglob("*"):
         if p.is_file():
@@ -199,10 +204,9 @@ def collect_source_a_samples() -> List[Dict]:
             lbl_name = str(row["labelfile"])
             target = int(row["target"])
 
-            # Check target class
             target_class = SOURCE_A_TARGETS.get(target)
             if target_class is None:
-                continue  # Discard out-of-scope classes (Bazooka, Grenade Launcher)
+                continue
 
             img_path = file_map.get(img_name)
             lbl_path = file_map.get(lbl_name)
@@ -238,7 +242,6 @@ def collect_source_b_samples(
         logger.warning("Source B not found at %s", source_dir)
         return [], []
 
-    # Find all image files
     img_files: List[Path] = []
     for ext in ("*.jpg", "*.jpeg", "*.png"):
         img_files.extend(source_dir.rglob(ext))
@@ -264,7 +267,6 @@ def collect_source_b_samples(
                 }
             )
         else:
-            # Default class 0: Gun
             positives.append(
                 {
                     "image_path": img_path,
@@ -288,29 +290,220 @@ def collect_source_b_samples(
     return positives, negatives
 
 
+def collect_extra_knife_samples() -> List[Dict]:
+    """
+    Ingest supplementary knife dataset from DataSets/raw/weapons/extra_knives (or extra_knifes).
+    Strictly maps all knife annotations to Class 1: Knife.
+    """
+    candidate_dirs = [
+        RAW_DIR / "extra_knives",
+        RAW_DIR / "extra_knifes",
+        RAW_ALT_DIR / "extra_knives",
+        RAW_ALT_DIR / "extra_knifes",
+    ]
+    extra_dir: Optional[Path] = None
+    for cdir in candidate_dirs:
+        if cdir.exists() and cdir.is_dir():
+            extra_dir = cdir
+            break
+
+    if extra_dir is None:
+        logger.warning("Supplementary knife directory not found in candidates: %s", candidate_dirs)
+        return []
+
+    logger.info("Found supplementary knife dataset at: %s", extra_dir)
+
+    img_files: List[Path] = []
+    for ext in ("*.jpg", "*.jpeg", "*.png"):
+        img_files.extend(extra_dir.rglob(ext))
+
+    knife_samples: List[Dict] = []
+    for img_p in img_files:
+        # Standard Roboflow YOLO structure: split/images/xxx.jpg and split/labels/xxx.txt
+        lbl_p = img_p.parent.parent / "labels" / f"{img_p.stem}.txt"
+        if not lbl_p.exists():
+            # Try same directory
+            lbl_p = img_p.parent / f"{img_p.stem}.txt"
+
+        if not lbl_p.exists() or lbl_p.stat().st_size == 0:
+            continue
+
+        knife_samples.append(
+            {
+                "image_path": img_p,
+                "label_path": lbl_p,
+                "target_class": 1,  # Strictly Knife (1)
+                "is_negative": False,
+                "source": "extra_knives",
+                "is_augmented": False,
+            }
+        )
+
+    logger.info("Supplementary Knives: Collected %d valid knife samples", len(knife_samples))
+    return knife_samples
+
+
+# ==============================================================================
+# Spatial & Photometric Knife Augmentation Engine
+# ==============================================================================
+def apply_knife_augmentation(
+    img: np.ndarray,
+    bboxes: List[Tuple[float, float, float, float]],
+    aug_mode: str,
+) -> Tuple[np.ndarray, List[Tuple[float, float, float, float]]]:
+    """
+    Apply geometric and photometric transformations to knife images and bboxes:
+      - 'flip': Horizontal flip (recalculating x_center = 1.0 - x_center)
+      - 'rotate': Slight random rotation (+-10° to +-15°) with corner-recalculated bbox
+      - 'photometric': HSV color/brightness jitter & Gaussian/motion blur
+      - 'combined': Flip/rotation + photometric jitter
+    """
+    h_img, w_img = img.shape[:2]
+    img_aug = img.copy()
+    aug_boxes: List[Tuple[float, float, float, float]] = []
+
+    # 1. Geometric transforms
+    if aug_mode in ("flip", "combined_flip"):
+        img_aug = cv2.flip(img_aug, 1)
+        for xc, yc, w, h in bboxes:
+            new_xc = 1.0 - xc
+            aug_boxes.append((new_xc, yc, w, h))
+
+    elif aug_mode in ("rotate", "combined_rotate"):
+        # Select rotation angle between +-10 and +-15 degrees
+        angle = random.choice([random.uniform(-15.0, -10.0), random.uniform(10.0, 15.0)])
+        M = cv2.getRotationMatrix2D((w_img / 2.0, h_img / 2.0), angle, 1.0)
+        img_aug = cv2.warpAffine(img_aug, M, (w_img, h_img), borderMode=cv2.BORDER_REFLECT)
+
+        for xc, yc, w, h in bboxes:
+            x_c_px, y_c_px = xc * w_img, yc * h_img
+            w_px, h_px = w * w_img, h * h_img
+            x1, y1 = x_c_px - w_px / 2.0, y_c_px - h_px / 2.0
+            x2, y2 = x_c_px + w_px / 2.0, y_c_px + h_px / 2.0
+
+            corners = np.array(
+                [
+                    [x1, y1, 1.0],
+                    [x2, y1, 1.0],
+                    [x2, y2, 1.0],
+                    [x1, y2, 1.0],
+                ],
+                dtype=np.float32,
+            )
+            rot_corners = corners @ M.T
+
+            rx_min = max(0.0, float(np.min(rot_corners[:, 0]) / w_img))
+            rx_max = min(1.0, float(np.max(rot_corners[:, 0]) / w_img))
+            ry_min = max(0.0, float(np.min(rot_corners[:, 1]) / h_img))
+            ry_max = min(1.0, float(np.max(rot_corners[:, 1]) / h_img))
+
+            rw = rx_max - rx_min
+            rh = ry_max - ry_min
+            if rw > 0.005 and rh > 0.005:
+                aug_boxes.append((rx_min + rw / 2.0, ry_min + rh / 2.0, rw, rh))
+            else:
+                aug_boxes.append((xc, yc, w, h))
+    else:
+        # Photometric only (geometry unchanged)
+        aug_boxes = list(bboxes)
+
+    # 2. Photometric transforms (HSV jitter & blur)
+    if aug_mode in ("photometric", "combined_flip", "combined_rotate"):
+        try:
+            hsv = cv2.cvtColor(img_aug, cv2.COLOR_BGR2HSV).astype(np.float32)
+            # Saturation jitter
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * random.uniform(0.7, 1.3), 0.0, 255.0)
+            # Value / Brightness jitter
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * random.uniform(0.7, 1.3), 0.0, 255.0)
+            img_aug = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+            # Slight surveillance blur (Gaussian or Motion)
+            if random.random() > 0.5:
+                img_aug = cv2.GaussianBlur(img_aug, (5, 5), random.uniform(0.6, 1.4))
+            else:
+                k_size = random.choice([3, 5])
+                kernel = np.zeros((k_size, k_size))
+                kernel[int((k_size - 1) / 2), :] = np.ones(k_size) / k_size
+                img_aug = cv2.filter2D(img_aug, -1, kernel)
+        except Exception as exc:
+            logger.debug("Photometric jitter skipped due to: %s", exc)
+
+    return img_aug, aug_boxes
+
+
+def generate_augmented_knife_samples(
+    pooled_knives: List[Dict],
+    target_total_knives: int = 1350,
+) -> List[Dict]:
+    """
+    Generate synthetic augmented knife samples to hit target range (1,200 – 1,500 total).
+    Augmentation modes: flip, rotate, photometric, combined.
+    """
+    current_count = len(pooled_knives)
+    deficit = max(0, target_total_knives - current_count)
+    if deficit == 0:
+        logger.info("Knife count (%d) already meets target (%d).", current_count, target_total_knives)
+        return []
+
+    logger.info(
+        "Augmenting Knives: Generating %d synthetic samples to scale from %d to %d...",
+        deficit,
+        current_count,
+        target_total_knives,
+    )
+
+    random.seed(42)
+    selected_for_aug = random.sample(pooled_knives, min(deficit, len(pooled_knives)))
+    # If deficit > len(pooled_knives), sample with replacement
+    while len(selected_for_aug) < deficit:
+        selected_for_aug.append(random.choice(pooled_knives))
+
+    aug_modes = ["flip", "rotate", "photometric", "combined_flip", "combined_rotate"]
+    augmented_samples: List[Dict] = []
+
+    for i, base_sample in enumerate(selected_for_aug):
+        mode = aug_modes[i % len(aug_modes)]
+        augmented_samples.append(
+            {
+                "image_path": base_sample["image_path"],
+                "label_path": base_sample["label_path"],
+                "target_class": 1,
+                "is_negative": False,
+                "source": "knife_aug",
+                "is_augmented": True,
+                "aug_mode": mode,
+            }
+        )
+
+    logger.info("Synthesized %d knife augmentation metadata entries", len(augmented_samples))
+    return augmented_samples
+
+
+# ==============================================================================
+# Sample Processing & File Writing
+# ==============================================================================
 def process_and_copy_sample(
     sample: Dict,
     dest_img_path: Path,
     dest_lbl_path: Path,
 ) -> bool:
-    """Validate, normalize bboxes, copy image and write standardized label file."""
+    """Validate, normalize bboxes, apply augmentations if flagged, and copy/write."""
     img_path = sample["image_path"]
     lbl_path = sample["label_path"]
     target_class = sample["target_class"]
     is_neg = sample["is_negative"]
+    is_aug = sample.get("is_augmented", False)
 
-    # Validate image
     dims = validate_image(img_path)
     if dims is None:
         return False
+    w_img, h_img = dims
 
     if is_neg:
-        # Standard empty YOLO annotation for negative/background images
         shutil.copy2(img_path, dest_img_path)
         dest_lbl_path.write_text("", encoding="utf-8")
         return True
 
-    # Validate bounding boxes
     if not lbl_path.exists():
         log_quarantine(img_path, "Missing label file for positive sample")
         return False
@@ -321,22 +514,41 @@ def process_and_copy_sample(
         log_quarantine(lbl_path, f"Cannot read label file: {exc}")
         return False
 
-    valid_lines: List[str] = []
+    valid_boxes: List[Tuple[float, float, float, float]] = []
     for line in lines:
         if not line.strip():
             continue
-        valid_bbox = validate_and_harmonize_bbox(line, target_class, dims)
-        if valid_bbox:
-            valid_lines.append(valid_bbox)
+        v_line = validate_and_harmonize_bbox(line, target_class, dims)
+        if v_line:
+            parts = v_line.split()
+            valid_boxes.append((float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])))
 
-    if not valid_lines:
+    if not valid_boxes:
         log_quarantine(img_path, "No valid bounding boxes after coordinate normalization")
         return False
 
-    # Copy image and write validated label
-    shutil.copy2(img_path, dest_img_path)
-    dest_lbl_path.write_text("\n".join(valid_lines) + "\n", encoding="utf-8")
-    return True
+    if is_aug:
+        # Load image and perform spatial/photometric augmentation
+        img = cv2.imread(str(img_path))
+        if img is None:
+            return False
+        aug_mode = sample.get("aug_mode", "flip")
+        img_aug, aug_bboxes = apply_knife_augmentation(img, valid_boxes, aug_mode)
+
+        # Write augmented image
+        cv2.imwrite(str(dest_img_path), img_aug)
+
+        # Write augmented label
+        aug_lines = [f"1 {bx[0]:.6f} {bx[1]:.6f} {bx[2]:.6f} {bx[3]:.6f}" for bx in aug_bboxes]
+        dest_lbl_path.write_text("\n".join(aug_lines) + "\n", encoding="utf-8")
+        return True
+
+    else:
+        # Standard copy
+        shutil.copy2(img_path, dest_img_path)
+        out_lines = [f"{target_class} {bx[0]:.6f} {bx[1]:.6f} {bx[2]:.6f} {bx[3]:.6f}" for bx in valid_boxes]
+        dest_lbl_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+        return True
 
 
 def split_and_write_dataset(
@@ -350,7 +562,6 @@ def split_and_write_dataset(
     random.seed(seed)
     np.random.seed(seed)
 
-    # Separate by class for stratified splitting
     guns = [s for s in all_samples if not s["is_negative"] and s["target_class"] == 0]
     knives = [s for s in all_samples if not s["is_negative"] and s["target_class"] == 1]
     negatives = [s for s in all_samples if s["is_negative"]]
@@ -369,7 +580,6 @@ def split_and_write_dataset(
         splits["val"].extend(group[n_train : n_train + n_val])
         splits["test"].extend(group[n_train + n_val :])
 
-    # Create destination directories
     for split_name in ("train", "val", "test"):
         (CURATED_DIR / "images" / split_name).mkdir(parents=True, exist_ok=True)
         (CURATED_DIR / "labels" / split_name).mkdir(parents=True, exist_ok=True)
@@ -381,7 +591,7 @@ def split_and_write_dataset(
     }
 
     for split_name, sample_list in splits.items():
-        logger.info("Processing '%s' split (%d samples)...", split_name, len(sample_list))
+        logger.info("Writing '%s' split (%d samples)...", split_name, len(sample_list))
         for idx, sample in enumerate(sample_list):
             prefix = sample["source"]
             stem = f"{prefix}_{sample['image_path'].stem}_{idx:05d}"
@@ -402,10 +612,10 @@ def split_and_write_dataset(
 
 
 def generate_dataset_yaml() -> Path:
-    """Generate Ultralytics YOLOv8 dataset configuration YAML."""
+    """Generate Ultralytics YOLOv8 dataset configuration YAML with root-relative path."""
     yaml_path = CURATED_DIR / "dataset.yaml"
     config = {
-        "path": str(CURATED_DIR.as_posix()),
+        "path": "DataSets/curated/weapon_yolo",
         "train": "images/train",
         "val": "images/val",
         "test": "images/test",
@@ -417,17 +627,26 @@ def generate_dataset_yaml() -> Path:
     }
     with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
-    logger.info("Generated YOLO configuration at: %s", yaml_path)
+    logger.info("Generated portable root-relative YOLO configuration at: %s", yaml_path)
     return yaml_path
 
 
+# ==============================================================================
+# Main Execution Entrypoint
+# ==============================================================================
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SENTINEL Weapon Preprocessing Pipeline")
+    parser = argparse.ArgumentParser(description="SENTINEL Weapon Preprocessing & Augmentation Pipeline")
     parser.add_argument(
         "--max_positives",
         type=int,
         default=4000,
-        help="Maximum positive weapon samples to incorporate from Source B (ensures balance and fast training)",
+        help="Maximum positive weapon samples from Source B (default: 4000)",
+    )
+    parser.add_argument(
+        "--target_knives",
+        type=int,
+        default=1350,
+        help="Target total knife instances across all sources + augmentations (default: 1350)",
     )
     parser.add_argument(
         "--neg_ratio",
@@ -437,12 +656,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logger.info("=" * 65)
-    logger.info("SENTINEL — Weapon Detection Preprocessing Pipeline (YOLOv8s)")
-    logger.info("=" * 65)
+    logger.info("=" * 70)
+    logger.info("SENTINEL — Weapon Detection Preprocessing & Augmentation Pipeline")
+    logger.info("=" * 70)
     logger.info("Workspace Root : %s", BASE_DIR)
     logger.info("Raw Input Dir  : %s", RAW_DIR)
     logger.info("Curated Output : %s", CURATED_DIR)
+    logger.info("Target Knives  : %d instances", args.target_knives)
 
     # 1. Collect from Source A (Guns + Knives)
     source_a_samples = collect_source_a_samples()
@@ -452,39 +672,64 @@ def main() -> None:
         max_positives=args.max_positives
     )
 
-    all_positives = source_a_samples + source_b_positives
-    logger.info("Total positive samples: %d", len(all_positives))
+    # 3. Ingest Supplementary Knife Dataset
+    extra_knife_samples = collect_extra_knife_samples()
 
-    # Calculate required negative background samples (~15% of total dataset)
-    # N / (P + N) = 0.15 => N = P * 0.15 / (1 - 0.15)
+    # Separate raw knives vs guns
+    guns_pooled = [s for s in source_a_samples if s["target_class"] == 0] + source_b_positives
+    knives_pooled = [s for s in source_a_samples if s["target_class"] == 1] + extra_knife_samples
+
+    logger.info("Pooled Raw Guns  : %d samples", len(guns_pooled))
+    logger.info("Pooled Raw Knives: %d samples (Source A: %d, Extra: %d)",
+                len(knives_pooled),
+                len([s for s in source_a_samples if s["target_class"] == 1]),
+                len(extra_knife_samples))
+
+    # 4. Generate Spatial & Photometric Knife Augmentations
+    augmented_knives = generate_augmented_knife_samples(
+        knives_pooled,
+        target_total_knives=args.target_knives,
+    )
+    all_knives = knives_pooled + augmented_knives
+    all_positives = guns_pooled + all_knives
+
+    logger.info("Total Final Positives: %d (Guns: %d, Knives: %d [%.1f%%])",
+                len(all_positives),
+                len(guns_pooled),
+                len(all_knives),
+                100.0 * len(all_knives) / len(all_positives))
+
+    # 5. Negative Background Samples (~15% of total dataset)
     target_neg_count = int(len(all_positives) * args.neg_ratio / (1.0 - args.neg_ratio))
     target_neg_count = min(target_neg_count, len(source_b_negatives))
 
     random.seed(42)
     selected_negatives = random.sample(source_b_negatives, target_neg_count)
-    logger.info("Selected %d negative background samples (~%.1f%% of dataset)",
-                len(selected_negatives),
-                100.0 * len(selected_negatives) / (len(all_positives) + len(selected_negatives)))
+    logger.info(
+        "Selected %d negative background samples (~%.1f%% of dataset)",
+        len(selected_negatives),
+        100.0 * len(selected_negatives) / (len(all_positives) + len(selected_negatives)),
+    )
 
     all_samples = all_positives + selected_negatives
     logger.info("Total combined samples to process: %d", len(all_samples))
 
-    # 3. Clean existing curated output dir if present
+    # 6. Clean existing curated output directory
     if CURATED_DIR.exists():
         logger.info("Cleaning existing curated directory: %s", CURATED_DIR)
         shutil.rmtree(CURATED_DIR)
     CURATED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 4. Stratified Split and Write
+    # 7. Stratified Split and Write
     stats = split_and_write_dataset(all_samples, seed=42)
 
-    # 5. Generate dataset.yaml
+    # 8. Generate dataset.yaml
     yaml_path = generate_dataset_yaml()
 
-    # 6. Report Summary
-    logger.info("=" * 65)
+    # 9. Summary Report
+    logger.info("=" * 70)
     logger.info("PREPROCESSING PIPELINE COMPLETE — SUMMARY REPORT:")
-    logger.info("=" * 65)
+    logger.info("=" * 70)
     total_samples = 0
     for split_name, counts in stats.items():
         split_total = sum(counts.values())
@@ -497,11 +742,11 @@ def main() -> None:
             counts["Background"],
             split_total,
         )
-    logger.info("-" * 65)
+    logger.info("-" * 70)
     logger.info("Total Curated Dataset Size : %d samples", total_samples)
     logger.info("Dataset YAML Configuration  : %s", yaml_path)
     logger.info("Quarantine Log File         : %s", QUARANTINE_LOG)
-    logger.info("=" * 65)
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":
