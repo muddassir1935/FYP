@@ -1,11 +1,7 @@
-﻿# Ultralytics YOLOv8 Dataset Configuration — SENTINEL Weapon Detection
-# ==============================================================================
-# Path is relative to project root or can be overridden during training
 path: DataSets/curated/weapon_yolo
 train: images/train
 val: images/val
 test: images/test
-
 nc: 2
 names:
   0: Gun

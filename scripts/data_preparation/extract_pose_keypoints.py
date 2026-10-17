@@ -3,11 +3,12 @@
 SENTINEL — Action Recognition Offline Pose Extraction Pipeline
 ==============================================================
 Extracts 17 skeletal keypoints (51-dim: X, Y, Conf) per person using
-YOLOv8m-Pose, filters strictly to 4 behavioral classes:
-  0: Normal Activity
-  1: Fighting
-  2: Robbery
-  3: Shooting
+YOLOv8m-Pose with temporal sliding window (window_size=30, stride=5),
+filters strictly to 4 canonical behavioral classes:
+  0: Normal Activity (RWF-2000 NonFight)
+  1: Fighting (RWF-2000 Fight + UCF-Crime Fighting)
+  2: Robbery (UCF-Crime Robbery)
+  3: Shooting (UCF-Crime Shooting)
 Enforces anti-data-leakage video-level splitting and segments continuous
 keypoint streams into fixed sliding windows of 30 consecutive frames (30, 51).
 
@@ -78,12 +79,12 @@ def log_quarantine(file_path: Path, reason: str) -> None:
 # ==============================================================================
 def discover_rwf2000_videos() -> Dict[str, List[Path]]:
     """
-    Discover RWF-2000 video files.
+    Discover RWF-2000 video files without artificial clipping.
     Maps:
       'Fight' -> 'fighting' (Class 1)
       'NonFight' -> 'normal' (Class 0)
     """
-    rwf_dir = RAW_RWF_DIR if RAW_RWF_DIR.exists() else ALT_RAW_DIR / "rwf2000"
+    rwf_dir = RAW_RWF_DIR if RAW_RWF_DIR.exists() else ALT_RAW_DIR / "rwf_2000"
     categories = {"normal": [], "fighting": []}
     if not rwf_dir.exists():
         logger.warning("RWF-2000 directory not found at: %s", rwf_dir)
@@ -103,7 +104,7 @@ def discover_rwf2000_videos() -> Dict[str, List[Path]]:
 
 def discover_ucf_crime_video_sequences() -> Dict[str, Dict[str, List[Path]]]:
     """
-    Discover UCF-Crime pre-extracted frame sequences.
+    Discover UCF-Crime pre-extracted frame sequences across all available splits.
     Strictly filters down to: 'Fighting', 'Robbery', 'Shooting'.
     Groups frames by unique video identifier:
       {
@@ -118,12 +119,6 @@ def discover_ucf_crime_video_sequences() -> Dict[str, Dict[str, List[Path]]]:
         logger.warning("UCF-Crime directory not found at: %s", ucf_dir)
         return categories
 
-    target_map = {
-        "fighting": "fighting",
-        "robbery": "robbery",
-        "shooting": "shooting",
-    }
-
     # Directly check target category folders across splits (Train and Test)
     for split in ("Train", "Test", "train", "test"):
         split_dir = ucf_dir / split
@@ -137,7 +132,6 @@ def discover_ucf_crime_video_sequences() -> Dict[str, Dict[str, List[Path]]]:
                 if not frame_file.name.endswith(".png"):
                     continue
                 # Extract video ID by removing the trailing frame number
-                # e.g. "Fighting002_x264_10.png" -> "Fighting002_x264"
                 parts = frame_file.stem.split("_")
                 if len(parts) >= 2 and parts[-1].isdigit():
                     video_id = "_".join(parts[:-1])
@@ -148,7 +142,6 @@ def discover_ucf_crime_video_sequences() -> Dict[str, Dict[str, List[Path]]]:
                     categories[matched_class][video_id] = []
                 categories[matched_class][video_id].append(frame_file)
 
-    # Sort each video sequence by frame index
     def parse_frame_idx(p: Path) -> int:
         match = re.search(r"(\d+)$", p.stem)
         return int(match.group(1)) if match else 0
@@ -172,8 +165,8 @@ def create_anti_leakage_splits(
     seed: int = 42,
 ) -> Dict[str, Dict[str, List]]:
     """
-    Partition video clips (NOT frames) across Train, Val, and Test splits.
-    Ensures frames/windows from the same video never appear in multiple splits.
+    Partition video clips (NOT individual windows) across Train, Val, and Test splits.
+    Ensures frames/windows from the same video never cross partition boundaries.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -234,23 +227,22 @@ def create_anti_leakage_splits(
 # ==============================================================================
 # YOLOv8m-Pose Feature Extraction Engine
 # ==============================================================================
-def extract_keypoints_from_frame(
+def extract_keypoints_from_batch(
     model,
-    frame: np.ndarray,
+    frames: List[np.ndarray],
     device: str,
-) -> np.ndarray:
+) -> List[np.ndarray]:
     """
     Extract 17 anatomical keypoints (51 floats: [x_norm, y_norm, conf] * 17)
-    from a single frame using YOLOv8m-Pose.
+    for a batch of frames using YOLOv8m-Pose.
     Multi-person strategy: selects primary person by largest bbox area * confidence.
     """
-    h, w = frame.shape[:2]
-    # Default 51 zeros if no person is detected
-    empty_keypoints = np.zeros(51, dtype=np.float32)
+    if not frames:
+        return []
 
     try:
         results = model.predict(
-            source=frame,
+            source=frames,
             device=device,
             verbose=False,
             conf=0.25,
@@ -258,51 +250,39 @@ def extract_keypoints_from_frame(
             classes=[0],  # Person class only
         )
     except Exception as exc:
-        logger.debug("Model prediction error: %s", exc)
-        return empty_keypoints
+        logger.debug("Model batch prediction error: %s", exc)
+        return [np.zeros(51, dtype=np.float32) for _ in frames]
 
-    if not results or len(results) == 0:
-        return empty_keypoints
+    keypoints_list: List[np.ndarray] = []
 
-    res = results[0]
-    if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
-        return empty_keypoints
+    for idx, res in enumerate(results):
+        empty_keypoints = np.zeros(51, dtype=np.float32)
+        if res.keypoints is None or res.boxes is None or len(res.boxes) == 0:
+            keypoints_list.append(empty_keypoints)
+            continue
 
-    # Locate primary interacting person (highest bbox area * score)
-    boxes = res.boxes.xywh.cpu().numpy()  # [N, 4]: x_c, y_c, bw, bh
-    confs = res.boxes.conf.cpu().numpy()
-    best_idx = -1
-    best_score = -1.0
+        boxes = res.boxes.xywh.cpu().numpy()
+        confs = res.boxes.conf.cpu().numpy()
+        areas = boxes[:, 2] * boxes[:, 3]
+        scores = areas * confs
+        best_idx = int(np.argmax(scores))
 
-    for i in range(len(boxes)):
-        area = boxes[i][2] * boxes[i][3]
-        score = area * confs[i]
-        if score > best_score:
-            best_score = score
-            best_idx = i
+        kp_data = res.keypoints.data[best_idx].cpu().numpy()
+        h, w = res.orig_shape
 
-    if best_idx < 0:
-        return empty_keypoints
+        flattened = np.zeros(51, dtype=np.float32)
+        for j in range(min(17, len(kp_data))):
+            kx = float(np.clip(kp_data[j][0] / max(w, 1), 0.0, 1.0))
+            ky = float(np.clip(kp_data[j][1] / max(h, 1), 0.0, 1.0))
+            kc = float(np.clip(kp_data[j][2] if kp_data.shape[-1] >= 3 else 1.0, 0.0, 1.0))
 
-    # Extract 17 keypoints for the primary person
-    # shape: [17, 3] or [17, 2] with conf
-    kp_data = res.keypoints.data[best_idx].cpu().numpy()  # [17, 3]: x, y, conf
+            flattened[j * 3] = kx
+            flattened[j * 3 + 1] = ky
+            flattened[j * 3 + 2] = kc
 
-    flattened = np.zeros(51, dtype=np.float32)
-    for j in range(min(17, len(kp_data))):
-        kx, ky = kp_data[j][0], kp_data[j][1]
-        kc = kp_data[j][2] if kp_data.shape[-1] >= 3 else 1.0
+        keypoints_list.append(flattened)
 
-        # Coordinate Normalization relative to frame dimensions
-        kx_norm = float(np.clip(kx / max(w, 1), 0.0, 1.0))
-        ky_norm = float(np.clip(ky / max(h, 1), 0.0, 1.0))
-        kc = float(np.clip(kc, 0.0, 1.0))
-
-        flattened[j * 3] = kx_norm
-        flattened[j * 3 + 1] = ky_norm
-        flattened[j * 3 + 2] = kc
-
-    return flattened
+    return keypoints_list
 
 
 def process_video_frames(
@@ -311,10 +291,11 @@ def process_video_frames(
     device: str,
     target_fps: int = 15,
     max_frames: int = 120,
+    batch_size: int = 8,
 ) -> List[np.ndarray]:
-    """Decode video frames and run pose extraction."""
+    """Decode video frames and run batched pose extraction."""
     item_type, data = video_item
-    keypoint_sequence: List[np.ndarray] = []
+    raw_frames: List[np.ndarray] = []
 
     if item_type == "rwf_file":
         video_path: Path = data
@@ -330,11 +311,10 @@ def process_video_frames(
 
         while True:
             ret, frame = cap.read()
-            if not ret or frame is None or len(keypoint_sequence) >= max_frames:
+            if not ret or frame is None or len(raw_frames) >= max_frames:
                 break
             if frame_idx % step == 0:
-                kps = extract_keypoints_from_frame(model, frame, device)
-                keypoint_sequence.append(kps)
+                raw_frames.append(frame)
             frame_idx += 1
         cap.release()
 
@@ -342,10 +322,18 @@ def process_video_frames(
         vid_id, frame_paths = data
         for fp in frame_paths[:max_frames]:
             frame = cv2.imread(str(fp))
-            if frame is None:
-                continue
-            kps = extract_keypoints_from_frame(model, frame, device)
-            keypoint_sequence.append(kps)
+            if frame is not None:
+                raw_frames.append(frame)
+
+    if not raw_frames:
+        return []
+
+    # Run batched inference
+    keypoint_sequence: List[np.ndarray] = []
+    for i in range(0, len(raw_frames), batch_size):
+        batch = raw_frames[i : i + batch_size]
+        batch_kps = extract_keypoints_from_batch(model, batch, device)
+        keypoint_sequence.extend(batch_kps)
 
     return keypoint_sequence
 
@@ -353,17 +341,17 @@ def process_video_frames(
 def create_sliding_windows(
     keypoints: List[np.ndarray],
     window_size: int = 30,
-    stride: int = 15,
+    stride: int = 5,
 ) -> List[np.ndarray]:
     """
     Segment continuous keypoint stream into fixed sliding windows of 30 frames.
+    Stride = 5 frames provides ~3x data multiplier per video.
     Output array shape: (30, 51).
     """
     windows: List[np.ndarray] = []
     total_frames = len(keypoints)
 
     if total_frames < window_size:
-        # If sequence is slightly shorter than 30 frames, pad by repeating last frame
         if total_frames >= 15:
             arr = np.array(keypoints, dtype=np.float32)
             pad_len = window_size - total_frames
@@ -383,7 +371,7 @@ def create_sliding_windows(
 # Pipeline Execution & Serialization
 # ==============================================================================
 def main() -> None:
-    parser = argparse.ArgumentParser(description="SENTINEL Offline Pose Extraction Pipeline")
+    parser = argparse.ArgumentParser(description="SENTINEL Offline Pose Extraction Pipeline (Stride=5)")
     parser.add_argument(
         "--window_size",
         type=int,
@@ -393,14 +381,20 @@ def main() -> None:
     parser.add_argument(
         "--stride",
         type=int,
-        default=15,
-        help="Sliding window stride (frames) (default: 15)",
+        default=5,
+        help="Sliding window stride (frames) (default: 5, provides ~3x multiplier)",
     )
     parser.add_argument(
         "--max_videos_per_class",
         type=int,
-        default=None,
-        help="Maximum video clips per class to process (optional cap for fast execution)",
+        default=20,
+        help="Maximum video clips per class to process (default: 20, yields ~200-240 base sequences per class)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for YOLOv8m-Pose inference (default: 8)",
     )
     parser.add_argument(
         "--device",
@@ -411,12 +405,13 @@ def main() -> None:
     args = parser.parse_args()
 
     device = args.device or get_device()
-    logger.info("=" * 65)
-    logger.info("SENTINEL — Offline Pose Extraction Pipeline (YOLOv8m-Pose)")
-    logger.info("=" * 65)
+    logger.info("=" * 70)
+    logger.info("SENTINEL — Offline Pose Extraction Pipeline (YOLOv8m-Pose, Stride=%d)", args.stride)
+    logger.info("=" * 70)
     logger.info("Selected Device   : %s", device.upper())
     logger.info("Window Size       : %d frames", args.window_size)
     logger.info("Window Stride     : %d frames", args.stride)
+    logger.info("Max Vids/Class    : %s", str(args.max_videos_per_class))
     logger.info("Output Directory  : %s", CURATED_LSTM_DIR)
 
     # 1. Discover Video Datasets
@@ -434,8 +429,12 @@ def main() -> None:
     logger.info("Loading YOLOv8m-Pose model (%s)...", weights_path)
     model = YOLO("yolov8m-pose.pt")
 
-    # 4. Process Splits and Extract Keypoint Sequences
+    # Clean existing curated output directory if present to remove stale stride=15 files
+    if CURATED_LSTM_DIR.exists():
+        logger.info("Cleaning existing curated LSTM directory: %s", CURATED_LSTM_DIR)
+        shutil.rmtree(CURATED_LSTM_DIR)
     CURATED_LSTM_DIR.mkdir(parents=True, exist_ok=True)
+
     summary_stats = {
         "train": {c: 0 for c in CLASS_NAMES.values()},
         "val": {c: 0 for c in CLASS_NAMES.values()},
@@ -462,7 +461,12 @@ def main() -> None:
 
             seq_count = 0
             for idx, item in enumerate(tqdm(video_items, desc=f"{split_name}/{class_name}")):
-                kps_stream = process_video_frames(model, item, device=device)
+                kps_stream = process_video_frames(
+                    model,
+                    item,
+                    device=device,
+                    batch_size=args.batch_size,
+                )
                 if not kps_stream:
                     continue
 
@@ -473,7 +477,6 @@ def main() -> None:
                 )
 
                 for w_idx, win in enumerate(windows):
-                    # Sanity check: must be exactly (30, 51) and finite
                     if win.shape != (args.window_size, 51) or not np.isfinite(win).all():
                         continue
 
@@ -483,12 +486,12 @@ def main() -> None:
                     seq_count += 1
 
             summary_stats[split_name][class_name] = seq_count
-            logger.info("Saved %d sequences for '%s/%s'", seq_count, split_name, class_name)
+            logger.info("Saved %d base sequences for '%s/%s'", seq_count, split_name, class_name)
 
     # 5. Summary Report
-    logger.info("=" * 65)
-    logger.info("POSE EXTRACTION COMPLETE — DATASET AUDIT:")
-    logger.info("=" * 65)
+    logger.info("=" * 70)
+    logger.info("POSE EXTRACTION COMPLETE — BASE DATASET AUDIT (Stride=%d):", args.stride)
+    logger.info("=" * 70)
     total_sequences = 0
     for s_name, counts in summary_stats.items():
         s_total = sum(counts.values())
@@ -502,10 +505,10 @@ def main() -> None:
             counts["shooting"],
             s_total,
         )
-    logger.info("-" * 65)
-    logger.info("Total Extracted (30, 51) Sequences: %d", total_sequences)
-    logger.info("Curated Behavior LSTM Root        : %s", CURATED_LSTM_DIR)
-    logger.info("=" * 65)
+    logger.info("-" * 70)
+    logger.info("Total Base (30, 51) Sequences Extracted: %d", total_sequences)
+    logger.info("Curated Behavior LSTM Root              : %s", CURATED_LSTM_DIR)
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":
