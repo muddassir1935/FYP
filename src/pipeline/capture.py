@@ -34,11 +34,14 @@ class FrameSource:
         source: Union[int, str],
         *,
         loop_file: bool = False,
+        pace_file: bool = True,
         max_consecutive_failures: int = 50,
     ) -> None:
         self.source = source
         self.loop_file = loop_file
+        self.pace_file = pace_file
         self.max_consecutive_failures = max_consecutive_failures
+        self.source_fps: float = 0.0  # native FPS of a file source (0 = n/a)
         self._cap: Optional[object] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -58,6 +61,9 @@ class FrameSource:
         self._cap = cv2.VideoCapture(self.source)
         if not self._cap.isOpened():
             raise RuntimeError(f"Could not open video source: {self.source!r}")
+        if self._is_file_source():
+            fps = float(self._cap.get(cv2.CAP_PROP_FPS) or 0.0)
+            self.source_fps = fps if 1.0 <= fps <= 240.0 else 0.0
         self._running = True
         self._thread = threading.Thread(
             target=self._reader_loop, name="sentinel-capture", daemon=True
@@ -104,6 +110,11 @@ class FrameSource:
 
     # -- internals ----------------------------------------------------------
 
+    def _is_file_source(self) -> bool:
+        return isinstance(self.source, str) and not self.source.lower().startswith(
+            ("rtsp://", "http://", "https://")
+        )
+
     def _reader_loop(self) -> None:
         import cv2
 
@@ -111,6 +122,7 @@ class FrameSource:
         index = 0
         failures = 0
         while self._running:
+            tick = time.monotonic()
             ok, frame = self._cap.read()
             if not ok or frame is None:
                 if self.loop_file and self._rewind(cv2):
@@ -124,6 +136,13 @@ class FrameSource:
             index += 1
             with self._lock:
                 self._latest = (index, time.monotonic(), frame)
+            # A file would otherwise be decoded as fast as the CPU allows;
+            # pace it to its native frame rate so playback looks like video.
+            # Live sources (webcam/RTSP) arrive at their own rate already.
+            if self.pace_file and self.source_fps > 0 and self._is_file_source():
+                remaining = (1.0 / self.source_fps) - (time.monotonic() - tick)
+                if remaining > 0:
+                    time.sleep(remaining)
         self._ended = True
 
     def _rewind(self, cv2_module: object) -> bool:

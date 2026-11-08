@@ -58,6 +58,8 @@ Controls: `q` quit, `r` reset the temporal buffer.
 
 - `--conf` — detector confidence threshold. Lower = more sensitive, more
   false alarms for the buffer to filter.
+- `--imgsz` — inference image size (default 640). Smaller values (416, 320)
+  run much faster on CPU-only machines, at a small accuracy cost.
 - `--hits` / `--window` — stricter (e.g. 8/12) = fewer false alerts, slower
   confirmation; looser (e.g. 4/10) = faster alerts, more false positives.
 
@@ -65,6 +67,9 @@ Controls: `q` quit, `r` reset the temporal buffer.
 
 - The capture thread always keeps the newest frame only, so a slow detector
   drops stale frames instead of building up lag on live streams.
-- FPS shown in the HUD is measured on the machine running the demo; the
-  project's >= 25 FPS target is validated on the demo machine (RTX 3060
-  class), not on CPU.
+- Display and inference run on separate threads: video files are paced to
+  their native FPS and play smoothly even when detection is slower (e.g.
+  CPU-only); the newest detection boxes are overlaid on the live picture.
+  The HUD shows both rates (`FPS <display> (detect <inference>)`). The
+  project's >= 25 FPS target refers to the *detection* rate and is
+  validated on the demo machine (RTX 3060 class), not on CPU.

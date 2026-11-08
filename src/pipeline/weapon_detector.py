@@ -50,6 +50,7 @@ class WeaponDetector:
         *,
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45,
+        imgsz: int = 640,
         device: Optional[str] = None,
     ) -> None:
         try:
@@ -69,6 +70,7 @@ class WeaponDetector:
         self.weights = weights_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
+        self.imgsz = imgsz
         self.device = device
         self._model = YOLO(str(weights_path))
         names = self._model.names
@@ -82,6 +84,7 @@ class WeaponDetector:
             source=frame,
             conf=self.conf_threshold,
             iou=self.iou_threshold,
+            imgsz=self.imgsz,
             device=self.device,
             verbose=False,
         )
