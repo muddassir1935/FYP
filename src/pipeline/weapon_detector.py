@@ -40,8 +40,10 @@ class WeaponDetector:
 
     ``weights``: path to a ``.pt`` file (baseline v1:
     ``weapon_yolov8s_baseline_20261108_1837_best.pt`` — see
-    ``docs/training_run_log.md``). ``device``: ``"cuda"``/``"cpu"`` or
-    None for ultralytics' automatic choice.
+    ``docs/training_run_log.md``) or to an exported OpenVINO model folder
+    (``scripts/training/export_openvino.py``). ``device``: ``"cuda"`` /
+    ``"cpu"`` / ``"intel:gpu"`` (OpenVINO models) or None for ultralytics'
+    automatic choice.
     """
 
     def __init__(
@@ -62,8 +64,9 @@ class WeaponDetector:
         weights_path = Path(weights)
         if not weights_path.exists():
             raise FileNotFoundError(
-                f"Weights file not found: {weights_path}. Download the model "
-                "from Google Drive SENTINEL_FYP/runs/ (see "
+                f"Weights not found: {weights_path}. Download the model "
+                "(.pt file, or an exported OpenVINO model folder) from "
+                "Google Drive SENTINEL_FYP/runs/ (see "
                 "docs/training_run_log.md) and place it there — weights are "
                 "never stored in Git."
             )

@@ -54,6 +54,26 @@ Controls: `q` quit, `r` reset the temporal buffer.
 - `--save-video out.mp4` records the annotated stream; `--no-snapshots`
   disables snapshot saving.
 
+## Faster inference on Intel machines (OpenVINO)
+
+On machines without an NVIDIA GPU (e.g. an Intel Iris Xe laptop), PyTorch
+runs the model on CPU only (~5 FPS for YOLOv8s at 640). OpenVINO — Intel's
+inference toolkit — converts the *same* model into an Intel-optimised
+format that runs on the Intel CPU/iGPU instead. The `.pt` stays the master
+model; the OpenVINO folder is a derived copy for Intel hardware.
+
+```bash
+pip install openvino
+python scripts/training/export_openvino.py     # -> models/weights/best_openvino_model/
+python scripts/inference/run_weapon_demo.py --weights models/weights/best_openvino_model --source demo.mp4
+```
+
+The export script self-checks the exported model and prints an approximate
+blank-frame FPS for the machine it ran on. On recent ultralytics versions,
+adding `--device intel:gpu` to the demo selects the integrated GPU
+explicitly. RTX/NVIDIA demo machines keep using the `.pt` file — no export
+needed there.
+
 ## Tuning knobs
 
 - `--conf` — detector confidence threshold. Lower = more sensitive, more
