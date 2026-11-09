@@ -74,6 +74,18 @@ adding `--device intel:gpu` to the demo selects the integrated GPU
 explicitly. RTX/NVIDIA demo machines keep using the `.pt` file — no export
 needed there.
 
+**Measured on the dev laptop (Intel hybrid CPU + Iris Xe, 2026-11-09,
+imgsz 640):**
+
+| Format | Latency / frame | Inference FPS |
+| --- | --- | --- |
+| PyTorch `best.pt` (CPU) | 88.2 ms | 11.3 (cold demo run: ~5.1) |
+| OpenVINO `best_openvino_model` | 25.6 ms | 39.0 |
+
+OpenVINO is **3.44x faster** here and clears the project's >= 25 FPS
+target for the weapon stream on this laptop; the earlier 5.1 FPS figure
+was a cold PyTorch run through the full demo pipeline.
+
 ## Tuning knobs
 
 - `--conf` — detector confidence threshold (demo default **0.40**). At
