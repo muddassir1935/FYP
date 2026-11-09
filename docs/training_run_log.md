@@ -55,6 +55,26 @@ and demo.
   consistency buffer is the designed mitigation for single-frame misses and
   false alarms downstream.
 
+### Error analysis — baseline v1 (2026-11-09, from the val confusion matrix)
+
+- Gun<->Knife cross-confusion is negligible (12 Gun predicted as Knife,
+  3 Knife predicted as Gun): the two classes are not confused with each
+  other.
+- The dominant errors are background false alarms at the matrix's 0.25
+  threshold (22,256 Gun / 1,765 Knife unmatched predictions accumulated
+  across the val split — the matrix counts per image, so read these as
+  relative magnitudes, not absolute rates) and Gun misses (120 of 1,209
+  true Guns predicted background). The headline P/R/F1 are measured at
+  the model's best operating threshold — which is why the demo's default
+  confidence was raised to 0.40.
+- Field observation (user test, 2026-11-09): bullets held in a hand are
+  confirmed as Knife at up to 0.62 confidence. The scene is near-static,
+  so the false detection persists and the FR-05 buffer (which validates
+  persistence, not correctness) cannot filter it. Suspected hand-grip
+  context bias in the knife training images. Planned fix: dataset v2
+  with hard negatives (hands holding bullets/coins/pens/tools, ammunition
+  close-ups — all as background) plus retraining.
+
 ### Next
 Pipeline build (capture + weapon detector + temporal buffer + demo runner)
 on this baseline model. One optional tuning run (100 epochs) is queued for

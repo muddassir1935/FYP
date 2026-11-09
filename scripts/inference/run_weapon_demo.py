@@ -61,7 +61,20 @@ def parse_args() -> argparse.Namespace:
         default=str(REPO_ROOT / "models" / "weights" / "best.pt"),
         help="Path to the YOLOv8 weights file (default: models/weights/best.pt).",
     )
-    parser.add_argument("--conf", type=float, default=0.25, help="Detection confidence threshold.")
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=0.40,
+        help="Detection confidence threshold (default 0.40 — at 0.25 the model "
+        "emits many background false alarms; see docs/training_run_log.md).",
+    )
+    parser.add_argument(
+        "--hide-unconfirmed",
+        action="store_true",
+        help="Draw only FR-05-confirmed threats, hiding raw unconfirmed detections.",
+    )
+    parser.add_argument("--display-width", type=int, default=1280, help="Max on-screen width (default 1280).")
+    parser.add_argument("--display-height", type=int, default=720, help="Max on-screen height (default 720).")
     parser.add_argument(
         "--imgsz",
         type=int,
@@ -92,25 +105,51 @@ def draw_annotations(
     detections: list[Detection],
     confirmed: list[ConfirmedDetection],
     window: int,
+    *,
+    hide_unconfirmed: bool = False,
 ) -> object:
-    """Return a copy of ``frame`` with detection/confirmation boxes drawn."""
+    """Return a copy of ``frame`` with detection/confirmation boxes drawn.
+
+    Confirmed threats are thick red with a filled label chip; unconfirmed
+    detections are thin muted gray (raw model output always contains some
+    noise — the FR-05 confirmation is the system's actual verdict).
+    """
     display = frame.copy()
     confirmed_by_id = {id(cd.detection): cd for cd in confirmed}
+    font = cv2_module.FONT_HERSHEY_SIMPLEX
     for det in detections:
-        x1, y1, x2, y2 = (int(v) for v in det.bbox)
         cd = confirmed_by_id.get(id(det))
+        if cd is None and hide_unconfirmed:
+            continue
+        x1, y1, x2, y2 = (int(v) for v in det.bbox)
         if cd is not None:
             color, thickness = (0, 0, 255), 3
             label = f"{det.class_name} {det.confidence:.2f} CONFIRMED {cd.hits}/{window}"
         else:
-            color, thickness = (0, 200, 0), 1
+            color, thickness = (170, 170, 170), 1
             label = f"{det.class_name} {det.confidence:.2f}"
         cv2_module.rectangle(display, (x1, y1), (x2, y2), color, thickness)
+        (text_w, text_h), baseline = cv2_module.getTextSize(label, font, 0.55, 2)
+        chip_h = text_h + baseline + 6
+        chip_y1 = y1 - chip_h if y1 >= chip_h else y1
+        chip_y2 = chip_y1 + chip_h
+        cv2_module.rectangle(display, (x1, chip_y1), (x1 + text_w + 8, chip_y2), color, -1)
         cv2_module.putText(
-            display, label, (x1, max(y1 - 8, 12)),
-            cv2_module.FONT_HERSHEY_SIMPLEX, 0.55, color, 2, cv2_module.LINE_AA,
+            display, label, (x1 + 4, chip_y2 - baseline - 3),
+            font, 0.55, (255, 255, 255), 2, cv2_module.LINE_AA,
         )
     return display
+
+
+def fit_for_display(cv2_module: object, frame: object, max_width: int, max_height: int) -> object:
+    """Scale ``frame`` to fit inside (max_width, max_height), keeping aspect."""
+    height, width = frame.shape[:2]
+    scale = min(max_width / width, max_height / height)
+    if scale == 1.0:
+        return frame
+    new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
+    interpolation = cv2_module.INTER_AREA if scale < 1.0 else cv2_module.INTER_LINEAR
+    return cv2_module.resize(frame, new_size, interpolation=interpolation)
 
 
 class InferenceWorker(threading.Thread):
@@ -248,6 +287,8 @@ def main() -> int:
     display_fps = 0.0
     last_shown_index = 0
     last_show_tick = 0.0
+    window_name = "SENTINEL — weapon detection demo"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     with FrameSource(source, loop_file=args.loop) as stream:
         worker = InferenceWorker(
@@ -277,14 +318,20 @@ def main() -> int:
 
                     detections, confirmed, inference_fps = worker.latest()
                     display = draw_annotations(
-                        cv2, frame, detections, confirmed, args.window
+                        cv2, frame, detections, confirmed, args.window,
+                        hide_unconfirmed=args.hide_unconfirmed,
                     )
                     hud = (
                         f"FPS {display_fps:.1f} (detect {inference_fps:.1f}) | "
                         f"frame {frame_index} | confirmed threats: {len(confirmed)}"
                     )
+                    # Dark translucent bar keeps the white HUD readable on
+                    # bright frames (it used to vanish against the sky etc.).
+                    bar = display.copy()
+                    cv2.rectangle(bar, (0, 0), (display.shape[1], 44), (0, 0, 0), -1)
+                    cv2.addWeighted(bar, 0.55, display, 0.45, 0, display)
                     cv2.putText(
-                        display, hud, (12, 28),
+                        display, hud, (12, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
                     )
                     if args.save_video:
@@ -297,7 +344,11 @@ def main() -> int:
                                 (width, height),
                             )
                         writer.write(display)
-                    cv2.imshow("SENTINEL — weapon detection demo", display)
+                    # Only the on-screen copy is scaled to fit the screen;
+                    # recordings and snapshots keep the original resolution.
+                    shown = fit_for_display(cv2, display, args.display_width, args.display_height)
+                    cv2.imshow(window_name, shown)
+                    cv2.resizeWindow(window_name, shown.shape[1], shown.shape[0])
                 elif stream.ended and not args.loop:
                     break
 

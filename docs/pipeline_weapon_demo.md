@@ -76,8 +76,15 @@ needed there.
 
 ## Tuning knobs
 
-- `--conf` — detector confidence threshold. Lower = more sensitive, more
-  false alarms for the buffer to filter.
+- `--conf` — detector confidence threshold (demo default **0.40**). At
+  0.25 the model emits many background false alarms (see the error
+  analysis in `docs/training_run_log.md`); 0.40 sits near its best
+  operating point. Lower = more sensitive, more false alarms.
+- `--hide-unconfirmed` — draw only FR-05-confirmed threats; raw
+  unconfirmed detections (thin gray boxes by default) are hidden.
+- `--display-width` / `--display-height` — maximum on-screen window size
+  (default 1280x720). The view is scaled to fit, aspect preserved;
+  recordings and snapshots always keep the source's native resolution.
 - `--imgsz` — inference image size (default 640). Smaller values (416, 320)
   run much faster on CPU-only machines, at a small accuracy cost.
 - `--hits` / `--window` — stricter (e.g. 8/12) = fewer false alerts, slower
@@ -90,6 +97,8 @@ needed there.
 - Display and inference run on separate threads: video files are paced to
   their native FPS and play smoothly even when detection is slower (e.g.
   CPU-only); the newest detection boxes are overlaid on the live picture.
+- The HUD sits on a dark translucent bar and every box label has a filled
+  chip behind it, so text stays readable on bright frames.
   The HUD shows both rates (`FPS <display> (detect <inference>)`). The
   project's >= 25 FPS target refers to the *detection* rate and is
   validated on the demo machine (RTX 3060 class), not on CPU.
