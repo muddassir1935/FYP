@@ -38,6 +38,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# ASCII-only on purpose: a non-ASCII window title can be encoded
+# inconsistently by Windows/OpenCV between calls, which made the OS show
+# a second ghost window next to the real one.
+WINDOW_NAME = "SENTINEL - Weapon Detection Demo"
+
 from src.pipeline import (
     ConfirmedDetection,
     Detection,
@@ -96,7 +101,18 @@ def parse_args() -> argparse.Namespace:
         help="Loop a video file when it ends instead of exiting (file sources only).",
     )
     parser.add_argument("--device", default=None, help="'cuda', 'cpu', or omit for auto.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not 0.0 < args.conf <= 1.0:
+        parser.error("--conf must be in (0, 1]")
+    if args.window < 1:
+        parser.error("--window must be >= 1")
+    if not 1 <= args.hits <= args.window:
+        parser.error("--hits must be between 1 and --window (otherwise nothing can ever confirm)")
+    if args.display_width < 1 or args.display_height < 1:
+        parser.error("--display-width and --display-height must be positive")
+    if args.imgsz < 32:
+        parser.error("--imgsz must be at least 32")
+    return args
 
 
 def draw_annotations(
@@ -133,12 +149,43 @@ def draw_annotations(
         chip_h = text_h + baseline + 6
         chip_y1 = y1 - chip_h if y1 >= chip_h else y1
         chip_y2 = chip_y1 + chip_h
-        cv2_module.rectangle(display, (x1, chip_y1), (x1 + text_w + 8, chip_y2), color, -1)
+        # Clamp the chip inside the frame: near the right edge the label
+        # would otherwise run off-screen and get cut.
+        chip_x = min(x1, max(0, display.shape[1] - text_w - 8))
+        cv2_module.rectangle(display, (chip_x, chip_y1), (chip_x + text_w + 8, chip_y2), color, -1)
         cv2_module.putText(
-            display, label, (x1 + 4, chip_y2 - baseline - 3),
+            display, label, (chip_x + 4, chip_y2 - baseline - 3),
             font, 0.55, (255, 255, 255), 2, cv2_module.LINE_AA,
         )
     return display
+
+
+def draw_hud(
+    cv2_module: object,
+    frame: object,
+    display_fps: float,
+    inference_fps: float,
+    frame_index: int,
+    confirmed_count: int,
+) -> object:
+    """Draw the HUD on a dark translucent bar at the top of ``frame``.
+
+    Two short lines instead of one long line, so the text fits narrow
+    portrait frames instead of running off the right edge and getting cut.
+    """
+    bar = frame.copy()
+    cv2_module.rectangle(bar, (0, 0), (frame.shape[1], 68), (0, 0, 0), -1)
+    cv2_module.addWeighted(bar, 0.55, frame, 0.45, 0, frame)
+    font = cv2_module.FONT_HERSHEY_SIMPLEX
+    cv2_module.putText(
+        frame, f"FPS {display_fps:.1f} (detect {inference_fps:.1f})",
+        (12, 27), font, 0.65, (255, 255, 255), 2, cv2_module.LINE_AA,
+    )
+    cv2_module.putText(
+        frame, f"frame {frame_index} | confirmed: {confirmed_count}",
+        (12, 55), font, 0.65, (255, 255, 255), 2, cv2_module.LINE_AA,
+    )
+    return frame
 
 
 def fit_for_display(cv2_module: object, frame: object, max_width: int, max_height: int) -> object:
@@ -222,8 +269,12 @@ class InferenceWorker(threading.Thread):
             last_tick = tick
             last_index = frame_index
 
-            detections = self._detector.detect(frame)
-            confirmed = self._buffer.update(detections)
+            try:
+                detections = self._detector.detect(frame)
+                confirmed = self._buffer.update(detections)
+            except Exception as exc:  # fail loudly instead of freezing silently
+                print(f"Inference error, stopping detection: {exc}")
+                break
             with self._lock:
                 self._detections = detections
                 self._confirmed = confirmed
@@ -257,7 +308,7 @@ class InferenceWorker(threading.Thread):
             self._cv2.imwrite(str(path), annotated)
             print(
                 f"[ALERT] {cd.detection.class_name} confirmed "
-                f"({cd.hits}/{self._window} frames) — snapshot: {path}"
+                f"({cd.hits}/{self._window} frames) - snapshot: {path}"
             )
 
 
@@ -280,16 +331,14 @@ def main() -> int:
         snapshots_dir = Path(args.snapshots_dir)
         snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"SENTINEL demo — source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
+    print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
     print("Press q to quit, r to reset the temporal buffer.")
 
     writer = None
+    writer_failed = False
     display_fps = 0.0
     last_shown_index = 0
     last_show_tick = 0.0
-    window_name = "SENTINEL — weapon detection demo"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
     with FrameSource(source, loop_file=args.loop) as stream:
         worker = InferenceWorker(
             stream,
@@ -321,20 +370,8 @@ def main() -> int:
                         cv2, frame, detections, confirmed, args.window,
                         hide_unconfirmed=args.hide_unconfirmed,
                     )
-                    hud = (
-                        f"FPS {display_fps:.1f} (detect {inference_fps:.1f}) | "
-                        f"frame {frame_index} | confirmed threats: {len(confirmed)}"
-                    )
-                    # Dark translucent bar keeps the white HUD readable on
-                    # bright frames (it used to vanish against the sky etc.).
-                    bar = display.copy()
-                    cv2.rectangle(bar, (0, 0), (display.shape[1], 44), (0, 0, 0), -1)
-                    cv2.addWeighted(bar, 0.55, display, 0.45, 0, display)
-                    cv2.putText(
-                        display, hud, (12, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
-                    )
-                    if args.save_video:
+                    draw_hud(cv2, display, display_fps, inference_fps, frame_index, len(confirmed))
+                    if args.save_video and not writer_failed:
                         if writer is None:
                             height, width = display.shape[:2]
                             writer = cv2.VideoWriter(
@@ -343,12 +380,25 @@ def main() -> int:
                                 stream.source_fps or 25.0,
                                 (width, height),
                             )
-                        writer.write(display)
+                            if not writer.isOpened():
+                                print(
+                                    f"WARNING: cannot record to {args.save_video!r}; "
+                                    "recording disabled for this run."
+                                )
+                                writer.release()
+                                writer = None
+                                writer_failed = True
+                        if writer is not None:
+                            writer.write(display)
                     # Only the on-screen copy is scaled to fit the screen;
                     # recordings and snapshots keep the original resolution.
                     shown = fit_for_display(cv2, display, args.display_width, args.display_height)
-                    cv2.imshow(window_name, shown)
-                    cv2.resizeWindow(window_name, shown.shape[1], shown.shape[0])
+                    cv2.imshow(WINDOW_NAME, shown)
+                    try:
+                        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                            break  # window closed with the X button
+                    except cv2.error:
+                        break
                 elif stream.ended and not args.loop:
                     break
 
