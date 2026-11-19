@@ -83,6 +83,30 @@ def metric_block(metrics: Any, names: dict) -> dict[str, Any]:
     return out
 
 
+def resolve_train_output(results: Any, run_dir: Path) -> tuple[Path, dict[str, float]]:
+    """Resolve the run directory + train metrics from ``model.train()``.
+
+    Ultralytics changed ``model.train()``'s return type across versions:
+    older releases return the trainer (with ``.save_dir`` / ``.results_dict``),
+    newer ones return a plain metrics dict. The run dir is deterministic
+    (``project/name``, and the script always passes ``exist_ok=True``), so it
+    never depends on the return type.
+    """
+    if isinstance(results, dict):
+        raw_metrics: dict = results
+        save_dir = run_dir
+    else:
+        raw_metrics = getattr(results, "results_dict", {}) or {}
+        save_dir = Path(getattr(results, "save_dir", run_dir))
+    train_results: dict[str, float] = {}
+    for key, value in raw_metrics.items():
+        try:
+            train_results[str(key)] = round(float(value), 4)
+        except (TypeError, ValueError):
+            continue
+    return save_dir, train_results
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from ultralytics import YOLO  # lazy: keeps --help torch-free
@@ -113,15 +137,8 @@ def main(argv: list[str] | None = None) -> int:
             exist_ok=True,
         )
 
-    save_dir = Path(results.save_dir)
+    save_dir, train_results = resolve_train_output(results, run_dir)
     best = save_dir / "weights" / "best.pt"
-
-    train_results = {}
-    for key, value in (getattr(results, "results_dict", {}) or {}).items():
-        try:
-            train_results[str(key)] = round(float(value), 4)
-        except (TypeError, ValueError):
-            continue
 
     summary: dict[str, Any] = {
         "run_name": args.name,
