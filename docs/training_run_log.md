@@ -17,6 +17,7 @@ can be traced back to the exact weights that produced it.
 | 0 | flowtest_yolov8s_20261108_1021 | 2026-11-08 | pipeline check only (coco8, 5 epochs) | — | — | — | — | — | — | — |
 | 1 | weapon_yolov8s_smoke_20261108_1759 | 2026-11-08 | 10 epochs, imgsz 640, batch 16, seed 42, T4 | 0.653 | 0.3335 | 0.7128 | 0.5827 | 0.6412 | 0.5272 | 0.7787 |
 | 2 | weapon_yolov8s_baseline_20261108_1837 | 2026-11-08 | 50 epochs, imgsz 640, batch 16, seed 42, T4 | 0.8066 | 0.484 | 0.8326 | 0.7615 | 0.7955 | 0.7088 | 0.9045 |
+| 3 | weapon_yolov8s_v2_20261119_1059 | 2026-11-19 | 100 epochs, imgsz 640, batch 32, seed 42, 2x T4 DDP (Kaggle), dataset v2 + Knife 2x oversampling | 0.8621 | 0.5543 | 0.8319 | 0.8278 | 0.8298 | 0.7813 | 0.943 |
 
 ## Run notes
 
@@ -54,6 +55,35 @@ and demo.
   is the metric to watch for a surveillance use case — the FR-05 temporal
   consistency buffer is the designed mitigation for single-frame misses and
   false alarms downstream.
+
+### #3 — Dataset v2 retrain (2026-11-19)
+First run on dataset v2 (train 21,809 images after the quality sweep, with
+Knife 2x oversampling of 1,889 knife images → 23,698; val 1,351; **test 680
+FROZEN, the same split as v1, so the metrics are directly comparable**).
+Trained on Kaggle (2x T4, DDP), 100 epochs in ~6.6 h, patience 20 (no early
+stop). Adopted as the current working model (v2).
+
+- Weights: `weapon_yolov8s_v2_20261119_1059_best.pt` (22.53 MB)
+- SHA-256: `1c6ef07711287d62a8d010ffe9d9d7a7b558f632f285e91e1b4f66cd9645c847`
+- Drive: `SENTINEL_FYP/runs/weapon_yolov8s_v2_20261119_1059/`
+  (best.pt id `1z2baegmmqL1frskwzWQu5c6ffwDwj604`)
+- **Result:** mAP@0.5 0.8066 → **0.8621** (+5.6 pts). The biggest gains are
+  exactly where v1 was weakest: Gun AP50 0.7088 → **0.7813** (+7.3 pts) and
+  recall 0.7615 → **0.8278** (+6.6 pts). Knife AP50 0.9045 → **0.943**.
+  Precision is flat (0.8326 → 0.8319) — the gains came from finding more
+  true weapons, not from fewer false alarms.
+- **Post-training crash (recovered, no retrain needed):** after all 100
+  epochs, the training script crashed at `results.save_dir` — Kaggle's
+  newer Ultralytics returns a plain metrics dict from `model.train()`,
+  not the trainer object. The test evaluation and `run_summary.json`
+  never ran on Kaggle. The weights were safe (YOLO saves them during
+  training); `best.pt` + result files were downloaded via the Kaggle
+  session-output API and the test metrics above were evaluated locally
+  on CPU from the downloaded weights. Fixed in
+  `scripts/training/train_weapon_detector.py` (`resolve_train_output`
+  handles both return types).
+- **Next:** retest on the same bullet video + laptop webcam (user) — the
+  real-world check that val/test numbers cannot give.
 
 ### Error analysis — baseline v1 (2026-11-09, from the val confusion matrix)
 
