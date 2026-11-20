@@ -8,12 +8,29 @@ GPUs (e.g. Iris Xe) than plain PyTorch on CPU. The ``.pt`` file stays the
 master model; the OpenVINO folder is a derived copy for Intel machines.
 NVIDIA/RTX demo machines keep using the ``.pt`` + PyTorch/CUDA path.
 
-Usage (from the repo root, after ``pip install openvino``):
+Two precisions are supported:
+
+* **FP32** (default): the faithful export — same accuracy as the ``.pt``,
+  kept as the fallback whenever an INT8 model is also exported.
+* **INT8** (``--int8``): NNCF static quantization, calibrated on a sample
+  of the *validation* split (never the frozen test split). Typically
+  ~1.5–2x faster on Intel iGPUs for a small (<1 point) mAP cost — verify
+  on the frozen test set at a milestone before trusting it.
+
+Usage (from the repo root, after ``pip install openvino``;
+INT8 additionally needs ``pip install nncf``):
 
     python scripts/training/export_openvino.py
     # -> creates models/weights/best_openvino_model/
 
-    python scripts/inference/run_weapon_demo.py \
+    python scripts/training/export_openvino.py --int8 --data path/to/dataset.yaml
+    # -> creates models/weights/best_int8_openvino_model/ (300 val images)
+
+    python scripts/training/export_openvino.py --int8 --data dataset.yaml \\
+        --calibration-size 200 --out-dir /path/to/artifacts
+    # -> /path/to/artifacts/best_int8_openvino_model/
+
+    python scripts/inference/run_weapon_demo.py \\
         --weights models/weights/best_openvino_model --source demo.mp4
 
 The script finishes with a self-check: it loads the exported folder and
@@ -24,6 +41,7 @@ speed-up over the ``.pt`` model is visible before running the demo.
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -47,6 +65,32 @@ def parse_args() -> argparse.Namespace:
         "use the same value when running the demo).",
     )
     parser.add_argument(
+        "--int8",
+        action="store_true",
+        help="Quantize to INT8 with NNCF (needs --data). Calibrates on a "
+        "sample of the validation split; never on the frozen test split.",
+    )
+    parser.add_argument(
+        "--data",
+        default=None,
+        help="Dataset YAML (ultralytics format) for INT8 calibration. "
+        "The val split is used; required with --int8.",
+    )
+    parser.add_argument(
+        "--calibration-size",
+        type=int,
+        default=300,
+        help="Number of val images used for NNCF calibration (default 300).",
+    )
+    parser.add_argument(
+        "--out-dir",
+        default=None,
+        help="Parent directory the exported model folder is moved into "
+        "(keeps its ultralytics name, e.g. best_openvino_model — "
+        "ultralytics detects the OpenVINO format from that name). "
+        "Without it the folder stays next to the .pt weights.",
+    )
+    parser.add_argument(
         "--skip-check",
         action="store_true",
         help="Skip the post-export load + timing self-check.",
@@ -65,22 +109,49 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    if args.int8 and not args.data:
+        print("--int8 needs --data (dataset YAML for calibration).", file=sys.stderr)
+        return 1
+    if args.data and not Path(args.data).exists():
+        print(f"Dataset YAML not found: {args.data}", file=sys.stderr)
+        return 1
     try:
         from ultralytics import YOLO
     except ImportError:
         print("ultralytics is not installed; run: pip install ultralytics", file=sys.stderr)
         return 1
 
-    print(f"Exporting {weights} to OpenVINO (imgsz={args.imgsz}) ...")
-    try:
-        exported = Path(YOLO(str(weights)).export(format="openvino", imgsz=args.imgsz))
-    except ImportError:
+    precision = "INT8" if args.int8 else "FP32"
+    print(f"Exporting {weights} to OpenVINO {precision} (imgsz={args.imgsz}) ...")
+    if args.int8:
         print(
-            "OpenVINO is not installed; run: pip install openvino — then re-run this script.",
-            file=sys.stderr,
+            f"Calibrating NNCF on {args.calibration_size} val images "
+            f"from {args.data} ..."
         )
+    try:
+        export_kwargs = {"format": "openvino", "imgsz": args.imgsz}
+        if args.int8:
+            export_kwargs["quantize"] = 8
+            export_kwargs["data"] = args.data
+            # ultralytics treats an int fraction as an exact image count
+            export_kwargs["fraction"] = args.calibration_size
+        exported = Path(YOLO(str(weights)).export(**export_kwargs))
+    except ImportError as exc:
+        missing = "nncf" if args.int8 else "openvino"
+        print(f"{missing} is not installed ({exc}); run: pip install {missing}", file=sys.stderr)
         return 1
     print(f"Exported model folder: {exported}")
+
+    if args.out_dir:
+        dest = Path(args.out_dir) / exported.name
+        if dest.exists():
+            print(f"Destination already exists: {dest}", file=sys.stderr)
+            print(f"Exported folder left in place: {exported}", file=sys.stderr)
+            return 1
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(exported), str(dest))
+        exported = dest
+        print(f"Moved model folder to: {exported}")
 
     if not args.skip_check:
         fps = self_check(exported, args.imgsz)
