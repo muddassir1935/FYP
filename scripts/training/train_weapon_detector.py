@@ -41,6 +41,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=20,
                         help="Early-stopping patience in epochs.")
     parser.add_argument("--seed", type=int, default=42)
+    # Fine-tune / augmentation hyperparameters (YOLOv8 defaults, so a plain
+    # run behaves exactly as before). The v2.1 fine-tune passes lower lr0,
+    # rotation + perspective, and close_mosaic via these flags.
+    parser.add_argument("--lr0", type=float, default=0.01,
+                        help="Initial learning rate (v2 used 0.01; fine-tune "
+                             "with 0.001).")
+    parser.add_argument("--lrf", type=float, default=0.01,
+                        help="Final learning rate fraction (lr0 * lrf).")
+    parser.add_argument("--warmup-epochs", type=float, default=3.0)
+    parser.add_argument("--degrees", type=float, default=0.0,
+                        help="Random rotation range in degrees (+/-).")
+    parser.add_argument("--translate", type=float, default=0.1)
+    parser.add_argument("--scale", type=float, default=0.5)
+    parser.add_argument("--shear", type=float, default=0.0)
+    parser.add_argument("--perspective", type=float, default=0.0,
+                        help="Random perspective warp (0.0005-0.001).")
+    parser.add_argument("--flipud", type=float, default=0.0)
+    parser.add_argument("--fliplr", type=float, default=0.5)
+    parser.add_argument("--mosaic", type=float, default=1.0)
+    parser.add_argument("--mixup", type=float, default=0.0)
+    parser.add_argument("--copy-paste", type=float, default=0.0)
+    parser.add_argument("--erasing", type=float, default=0.4,
+                        help="Random erasing probability (occlusion).")
+    parser.add_argument("--hsv-h", type=float, default=0.015)
+    parser.add_argument("--hsv-s", type=float, default=0.7)
+    parser.add_argument("--hsv-v", type=float, default=0.4)
+    parser.add_argument("--close-mosaic", type=int, default=10,
+                        help="Disable mosaic for the final N epochs.")
     parser.add_argument("--project", default="runs/weapon")
     parser.add_argument("--name", default="weapon_yolov8s")
     parser.add_argument("--resume", action="store_true",
@@ -132,6 +160,24 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             patience=args.patience,
             seed=args.seed,
+            lr0=args.lr0,
+            lrf=args.lrf,
+            warmup_epochs=args.warmup_epochs,
+            degrees=args.degrees,
+            translate=args.translate,
+            scale=args.scale,
+            shear=args.shear,
+            perspective=args.perspective,
+            flipud=args.flipud,
+            fliplr=args.fliplr,
+            mosaic=args.mosaic,
+            mixup=args.mixup,
+            copy_paste=args.copy_paste,
+            erasing=args.erasing,
+            hsv_h=args.hsv_h,
+            hsv_s=args.hsv_s,
+            hsv_v=args.hsv_v,
+            close_mosaic=args.close_mosaic,
             project=args.project,
             name=args.name,
             exist_ok=True,
@@ -150,6 +196,24 @@ def main(argv: list[str] | None = None) -> int:
             "batch": args.batch,
             "patience": args.patience,
             "seed": args.seed,
+            "lr0": args.lr0,
+            "lrf": args.lrf,
+            "warmup_epochs": args.warmup_epochs,
+            "degrees": args.degrees,
+            "translate": args.translate,
+            "scale": args.scale,
+            "shear": args.shear,
+            "perspective": args.perspective,
+            "flipud": args.flipud,
+            "fliplr": args.fliplr,
+            "mosaic": args.mosaic,
+            "mixup": args.mixup,
+            "copy_paste": args.copy_paste,
+            "erasing": args.erasing,
+            "hsv_h": args.hsv_h,
+            "hsv_s": args.hsv_s,
+            "hsv_v": args.hsv_v,
+            "close_mosaic": args.close_mosaic,
         },
         "train_val_metrics": train_results,
         "test_metrics": {},
