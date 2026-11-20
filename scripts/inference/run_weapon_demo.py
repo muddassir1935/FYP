@@ -2,9 +2,22 @@
 """Standalone weapon-detection demo (FYP-I).
 
 Runs the SENTINEL weapon pipeline on a webcam, a video file, or an RTSP
-stream: YOLOv8 detection (FR-02), temporal consistency confirmation
-(FR-05, 6-of-10 by default), on-screen boxes, and a snapshot saved whenever
-a threat is confirmed.
+stream: YOLOv8 detection (FR-02), ByteTrack tracking + track-level class
+voting for confirmation (FR-05), on-screen boxes, and a snapshot saved
+whenever a threat is confirmed.
+
+Confirmation works in two stages. ByteTrack (``model.track``) gives each
+physical object a stable ID across frames — its two-stage association
+keeps a track alive through weak detections, so brief true glimpses are
+not lost. The track voter then assigns ONE stable label per track (a
+confidence-weighted majority vote over the track's lifetime), so the
+same object no longer flip-flops between Gun and Knife. A track
+confirms after ``--min-hits`` visible sightings (default 3). ByteTrack
+itself only shows a track after detections in 2 consecutive frames, so
+in practice a threat confirms after 4 consecutive detections (against 6
+for the old buffer) and 1-3 frame blips never confirm. The old 6-of-10
+temporal buffer (``src/pipeline/temporal_buffer.py``) is kept intact
+for RQ3 reproducibility — the demo simply no longer uses it.
 
 Playback design: capture, display and inference run on separate threads.
 The display shows every frame at the source's own pace (video files are
@@ -15,7 +28,8 @@ smoothly — only the box updates arrive at the inference rate.
 
 Model swap: ``--weights`` points at the model file. Upgrading the model
 (e.g. after a 100-epoch tuning run) means dropping the new ``best.pt`` at
-``models/weights/best.pt`` — no code changes.
+``models/weights/best.pt`` — no code changes. An exported OpenVINO
+folder works too, and tracking runs on its boxes the same way.
 
 Examples (from the repo root):
     python scripts/inference/run_weapon_demo.py                # webcam
@@ -30,7 +44,7 @@ a higher threshold than Knife by default (val-tuned operating point, see
 works as a single threshold for all classes when given; ``--conf-gun`` /
 ``--conf-knife`` override it per class.
 
-Controls: ``q`` quit, ``r`` reset the temporal buffer.
+Controls: ``q`` quit, ``r`` reset the tracker and the class voter.
 """
 
 from __future__ import annotations
@@ -51,10 +65,10 @@ if str(REPO_ROOT) not in sys.path:
 WINDOW_NAME = "SENTINEL - Weapon Detection Demo"
 
 from src.pipeline import (
-    ConfirmedDetection,
     Detection,
     FrameSource,
-    TemporalConsistencyBuffer,
+    TrackClassVoter,
+    TrackedDetection,
     WeaponDetector,
 )
 
@@ -120,8 +134,21 @@ def parse_args() -> argparse.Namespace:
         default=640,
         help="Inference image size. Smaller (e.g. 416) is much faster on CPU, slightly less accurate.",
     )
-    parser.add_argument("--window", type=int, default=10, help="Temporal buffer window (frames).")
-    parser.add_argument("--hits", type=int, default=6, help="Hits inside the window needed to confirm.")
+    parser.add_argument(
+        "--min-hits",
+        type=int,
+        default=3,
+        help="Visible sightings of a track needed to confirm it (default 3 — "
+        "with ByteTrack's 2-frame activation gate this confirms after 4 "
+        "consecutive detections and recovers 4-5 frame glimpses the old "
+        "6-of-10 buffer dropped; 1-3 frame blips still never confirm).",
+    )
+    parser.add_argument(
+        "--tracker",
+        default="bytetrack.yaml",
+        help="Ultralytics tracker config (default bytetrack.yaml; "
+        "ocsort.yaml also works).",
+    )
     parser.add_argument(
         "--snapshots-dir",
         default=str(REPO_ROOT / "snapshots"),
@@ -140,10 +167,8 @@ def parse_args() -> argparse.Namespace:
         value = getattr(args, name)
         if value is not None and not 0.0 < value <= 1.0:
             parser.error(f"--{name.replace('_', '-')} must be in (0, 1]")
-    if args.window < 1:
-        parser.error("--window must be >= 1")
-    if not 1 <= args.hits <= args.window:
-        parser.error("--hits must be between 1 and --window (otherwise nothing can ever confirm)")
+    if args.min_hits < 1:
+        parser.error("--min-hits must be >= 1")
     if args.display_width < 1 or args.display_height < 1:
         parser.error("--display-width and --display-height must be positive")
     if args.imgsz < 32:
@@ -177,16 +202,18 @@ def draw_annotations(
     cv2_module: object,
     frame: object,
     detections: list[Detection],
-    confirmed: list[ConfirmedDetection],
-    window: int,
+    confirmed: list[TrackedDetection],
     *,
     hide_unconfirmed: bool = False,
 ) -> object:
     """Return a copy of ``frame`` with detection/confirmation boxes drawn.
 
-    Confirmed threats are thick red with a filled label chip; unconfirmed
-    detections are thin muted gray (raw model output always contains some
-    noise — the FR-05 confirmation is the system's actual verdict).
+    Confirmed threats are thick red with a filled label chip showing the
+    track ID, sighting count and vote share; unconfirmed tracks are thin
+    muted gray (raw model output always contains some noise — the
+    track-vote confirmation is the system's actual verdict). Every box
+    already carries its track's voted label, so one object keeps one
+    label across frames.
     """
     display = frame.copy()
     confirmed_by_id = {id(cd.detection): cd for cd in confirmed}
@@ -198,7 +225,10 @@ def draw_annotations(
         x1, y1, x2, y2 = (int(v) for v in det.bbox)
         if cd is not None:
             color, thickness = (0, 0, 255), 3
-            label = f"{det.class_name} {det.confidence:.2f} CONFIRMED {cd.hits}/{window}"
+            label = (
+                f"{det.class_name} {det.confidence:.2f} CONFIRMED "
+                f"t{cd.track_id} {cd.hits}f vote {cd.vote_share:.2f}"
+            )
         else:
             color, thickness = (170, 170, 170), 1
             label = f"{det.class_name} {det.confidence:.2f}"
@@ -258,9 +288,9 @@ def fit_for_display(cv2_module: object, frame: object, max_width: int, max_heigh
 
 
 class InferenceWorker(threading.Thread):
-    """Runs detection + temporal confirmation on the newest frames.
+    """Runs detection + ByteTrack tracking + class voting on the newest frames.
 
-    Owns the detector and the buffer (single-threaded access, no locking
+    Owns the detector and the voter (single-threaded access, no locking
     around them) and publishes the latest result for the display loop.
     Snapshots are saved here, from the frame that was actually analysed.
     """
@@ -269,24 +299,24 @@ class InferenceWorker(threading.Thread):
         self,
         stream: FrameSource,
         detector: WeaponDetector,
-        buffer: TemporalConsistencyBuffer,
+        voter: TrackClassVoter,
         *,
         cv2_module: object,
-        window: int,
+        tracker: str,
         snapshots_dir: Path | None,
     ) -> None:
         super().__init__(name="sentinel-inference", daemon=True)
         self._stream = stream
         self._detector = detector
-        self._buffer = buffer
+        self._voter = voter
         self._cv2 = cv2_module
-        self._window = window
+        self._tracker = tracker
         self._snapshots_dir = snapshots_dir
         self._stop_event = threading.Event()
         self._reset_requested = threading.Event()
         self._lock = threading.Lock()
         self._detections: list[Detection] = []
-        self._confirmed: list[ConfirmedDetection] = []
+        self._confirmed: list[TrackedDetection] = []
         self._fps = 0.0
         self._last_snapshot_at: dict[int, float] = {}
 
@@ -296,7 +326,7 @@ class InferenceWorker(threading.Thread):
     def request_reset(self) -> None:
         self._reset_requested.set()
 
-    def latest(self) -> tuple[list[Detection], list[ConfirmedDetection], float]:
+    def latest(self) -> tuple[list[Detection], list[TrackedDetection], float]:
         with self._lock:
             return self._detections, self._confirmed, self._fps
 
@@ -306,8 +336,9 @@ class InferenceWorker(threading.Thread):
         while not self._stop_event.is_set():
             if self._reset_requested.is_set():
                 self._reset_requested.clear()
-                self._buffer.reset()
-                print("Temporal buffer reset.")
+                self._detector.reset_tracker()
+                self._voter.reset()
+                print("Tracker and class voter reset.")
             packet = self._stream.read()
             if packet is None:
                 if self._stream.ended:
@@ -328,11 +359,14 @@ class InferenceWorker(threading.Thread):
             last_index = frame_index
 
             try:
-                detections = self._detector.detect(frame)
-                confirmed = self._buffer.update(detections)
+                tracked = self._voter.update(
+                    self._detector.track(frame, tracker=self._tracker)
+                )
             except Exception as exc:  # fail loudly instead of freezing silently
                 print(f"Inference error, stopping detection: {exc}")
                 break
+            detections = [t.detection for t in tracked]
+            confirmed = [t for t in tracked if t.confirmed]
             with self._lock:
                 self._detections = detections
                 self._confirmed = confirmed
@@ -342,7 +376,7 @@ class InferenceWorker(threading.Thread):
         self,
         frame: object,
         detections: list[Detection],
-        confirmed: list[ConfirmedDetection],
+        confirmed: list[TrackedDetection],
     ) -> None:
         if self._snapshots_dir is None or not confirmed:
             return
@@ -355,7 +389,7 @@ class InferenceWorker(threading.Thread):
         ]
         if not fresh:
             return
-        annotated = draw_annotations(self._cv2, frame, detections, confirmed, self._window)
+        annotated = draw_annotations(self._cv2, frame, detections, confirmed)
         for cd in fresh:
             self._last_snapshot_at[cd.track_id] = now
             stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -366,7 +400,8 @@ class InferenceWorker(threading.Thread):
             self._cv2.imwrite(str(path), annotated)
             print(
                 f"[ALERT] {cd.detection.class_name} confirmed "
-                f"({cd.hits}/{self._window} frames) - snapshot: {path}"
+                f"(track {cd.track_id}, {cd.hits} frames, "
+                f"vote {cd.vote_share:.2f}) - snapshot: {path}"
             )
 
 
@@ -386,7 +421,7 @@ def main() -> int:
         imgsz=args.imgsz,
         device=args.device,
     )
-    buffer = TemporalConsistencyBuffer(window=args.window, required_hits=args.hits)
+    voter = TrackClassVoter(min_hits=args.min_hits)
     source: int | str = int(args.source) if args.source.isdigit() else args.source
 
     snapshots_dir: Path | None = None
@@ -396,7 +431,8 @@ def main() -> int:
 
     print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
     print(f"Confidence thresholds: Gun={conf_gun:.2f} Knife={conf_knife:.2f}")
-    print("Press q to quit, r to reset the temporal buffer.")
+    print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits})")
+    print("Press q to quit, r to reset the tracker and class voter.")
 
     writer = None
     writer_failed = False
@@ -407,9 +443,9 @@ def main() -> int:
         worker = InferenceWorker(
             stream,
             detector,
-            buffer,
+            voter,
             cv2_module=cv2,
-            window=args.window,
+            tracker=args.tracker,
             snapshots_dir=snapshots_dir,
         )
         worker.start()
@@ -431,7 +467,7 @@ def main() -> int:
 
                     detections, confirmed, inference_fps = worker.latest()
                     display = draw_annotations(
-                        cv2, frame, detections, confirmed, args.window,
+                        cv2, frame, detections, confirmed,
                         hide_unconfirmed=args.hide_unconfirmed,
                     )
                     draw_hud(cv2, display, display_fps, inference_fps, frame_index, len(confirmed))

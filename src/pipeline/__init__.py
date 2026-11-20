@@ -2,6 +2,7 @@
 
 from .capture import FrameSource
 from .temporal_buffer import ConfirmedDetection, TemporalConsistencyBuffer, bbox_iou
+from .track_voting import TrackClassVoter, TrackedDetection
 from .weapon_detector import Detection, WeaponDetector
 
 __all__ = [
@@ -11,4 +12,6 @@ __all__ = [
     "TemporalConsistencyBuffer",
     "ConfirmedDetection",
     "bbox_iou",
+    "TrackClassVoter",
+    "TrackedDetection",
 ]
