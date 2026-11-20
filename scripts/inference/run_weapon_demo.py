@@ -22,6 +22,13 @@ Examples (from the repo root):
     python scripts/inference/run_weapon_demo.py --source demo.mp4 --loop
     python scripts/inference/run_weapon_demo.py --source rtsp://cam/stream
     python scripts/inference/run_weapon_demo.py --imgsz 416    # faster on CPU
+    python scripts/inference/run_weapon_demo.py --conf-gun 0.60 --conf-knife 0.25
+
+Confidence thresholds: Gun is the false-positive-prone class, so it runs
+a higher threshold than Knife by default (val-tuned operating point, see
+``sentinel-dataset-v2/thresholds/operating_point.md``). ``--conf`` still
+works as a single threshold for all classes when given; ``--conf-gun`` /
+``--conf-knife`` override it per class.
 
 Controls: ``q`` quit, ``r`` reset the temporal buffer.
 """
@@ -51,6 +58,14 @@ from src.pipeline import (
     WeaponDetector,
 )
 
+# Val-tuned operating point for the v2 weights (Gun: constrained
+# F1-optimal at precision >= 0.90; Knife: F1-optimal). Re-tune after the
+# v2.1 fine-tune — see sentinel-dataset-v2/thresholds/operating_point.md.
+DEFAULT_CONF_GUN = 0.44
+DEFAULT_CONF_KNIFE = 0.43
+# Generic fallback for any class without a per-class threshold.
+DEFAULT_CONF = 0.40
+
 SNAPSHOT_COOLDOWN_SECONDS = 5.0
 
 
@@ -69,9 +84,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--conf",
         type=float,
-        default=0.40,
-        help="Detection confidence threshold (default 0.40 — at 0.25 the model "
-        "emits many background false alarms; see docs/training_run_log.md).",
+        default=None,
+        help="Single confidence threshold for all classes. When omitted, "
+        "the per-class operating point below is used instead (Gun "
+        f"{DEFAULT_CONF_GUN:.2f}, Knife {DEFAULT_CONF_KNIFE:.2f}); when "
+        "given, it is the fallback for any class without its own "
+        "--conf-<class> override.",
+    )
+    parser.add_argument(
+        "--conf-gun",
+        type=float,
+        default=None,
+        help="Confidence threshold for Gun only (default: "
+        f"{DEFAULT_CONF_GUN:.2f}, the val-tuned operating point). "
+        "Overrides --conf for this class.",
+    )
+    parser.add_argument(
+        "--conf-knife",
+        type=float,
+        default=None,
+        help="Confidence threshold for Knife only (default: "
+        f"{DEFAULT_CONF_KNIFE:.2f}, the val-tuned operating point). "
+        "Overrides --conf for this class.",
     )
     parser.add_argument(
         "--hide-unconfirmed",
@@ -102,8 +136,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--device", default=None, help="'cuda', 'cpu', or omit for auto.")
     args = parser.parse_args()
-    if not 0.0 < args.conf <= 1.0:
-        parser.error("--conf must be in (0, 1]")
+    for name in ("conf", "conf_gun", "conf_knife"):
+        value = getattr(args, name)
+        if value is not None and not 0.0 < value <= 1.0:
+            parser.error(f"--{name.replace('_', '-')} must be in (0, 1]")
     if args.window < 1:
         parser.error("--window must be >= 1")
     if not 1 <= args.hits <= args.window:
@@ -113,6 +149,28 @@ def parse_args() -> argparse.Namespace:
     if args.imgsz < 32:
         parser.error("--imgsz must be at least 32")
     return args
+
+
+def resolve_thresholds(args: argparse.Namespace) -> tuple[float, float, float]:
+    """Return (conf_gun, conf_knife, fallback_conf) for the demo run.
+
+    Per class: an explicit ``--conf-<class>`` wins, then an explicit
+    ``--conf`` (single-threshold mode, as before), then the val-tuned
+    per-class operating point. The fallback is the generic threshold
+    for any class without a per-class override.
+    """
+    conf_gun = (
+        args.conf_gun
+        if args.conf_gun is not None
+        else args.conf if args.conf is not None else DEFAULT_CONF_GUN
+    )
+    conf_knife = (
+        args.conf_knife
+        if args.conf_knife is not None
+        else args.conf if args.conf is not None else DEFAULT_CONF_KNIFE
+    )
+    fallback_conf = args.conf if args.conf is not None else DEFAULT_CONF
+    return conf_gun, conf_knife, fallback_conf
 
 
 def draw_annotations(
@@ -320,8 +378,13 @@ def main() -> int:
         print("opencv-python is not installed; run: pip install opencv-python", file=sys.stderr)
         return 1
 
+    conf_gun, conf_knife, fallback_conf = resolve_thresholds(args)
     detector = WeaponDetector(
-        args.weights, conf_threshold=args.conf, imgsz=args.imgsz, device=args.device
+        args.weights,
+        conf_threshold=fallback_conf,
+        conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
+        imgsz=args.imgsz,
+        device=args.device,
     )
     buffer = TemporalConsistencyBuffer(window=args.window, required_hits=args.hits)
     source: int | str = int(args.source) if args.source.isdigit() else args.source
@@ -332,6 +395,7 @@ def main() -> int:
         snapshots_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
+    print(f"Confidence thresholds: Gun={conf_gun:.2f} Knife={conf_knife:.2f}")
     print("Press q to quit, r to reset the temporal buffer.")
 
     writer = None
