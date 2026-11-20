@@ -95,6 +95,7 @@ class WeaponDetector:
         self.iou_threshold = iou_threshold
         self.imgsz = imgsz
         self.device = device
+        self._tracker_reset_pending = False
         self._model = YOLO(str(weights_path))
         names = self._model.names
         self.class_names: Dict[int, str] = (
@@ -150,22 +151,74 @@ class WeaponDetector:
             device=self.device,
             verbose=False,
         )
-        detections: List[Detection] = []
+        return self._boxes_to_detections(results[0].boxes)
+
+    def track(
+        self, frame: object, *, tracker: str = "bytetrack.yaml"
+    ) -> List[Tuple[int, Detection]]:
+        """Detect + ByteTrack one frame; return ``(track_id, detection)`` pairs.
+
+        Uses ``model.track(persist=True)`` so track IDs stay stable across
+        calls on consecutive frames of the same video. ByteTrack's
+        two-stage association matches high-confidence detections first,
+        then gives unmatched tracks a second chance against
+        low-confidence detections — a weak glimpse is enough to keep an
+        existing track alive. Call :meth:`reset_tracker` when the video
+        source changes (new file, new camera) so stale tracks do not
+        leak into the new stream.
+
+        Works for both ``.pt`` weights and exported OpenVINO folders:
+        Ultralytics runs the same tracker on either model's boxes.
+        """
+        results = self._model.track(
+            source=frame,
+            persist=not self._tracker_reset_pending,
+            tracker=tracker,
+            # Predict at the lowest threshold so no candidate above any
+            # per-class threshold is pre-filtered away; per-class
+            # filtering happens on the returned pairs below.
+            conf=self._predict_conf,
+            iou=self.iou_threshold,
+            imgsz=self.imgsz,
+            device=self.device,
+            verbose=False,
+        )
+        self._tracker_reset_pending = False
         boxes = results[0].boxes
-        if boxes is None:
-            return detections
-        for box in boxes:
-            class_id = int(box.cls[0])
-            confidence = float(box.conf[0])
-            if confidence < self.threshold_for(class_id):
+        if boxes is None or boxes.id is None:
+            return []
+        tracked: List[Tuple[int, Detection]] = []
+        for box, track_id in zip(boxes, boxes.id.tolist()):
+            detection = self._box_to_detection(box)
+            if detection.confidence < self.threshold_for(detection.class_id):
                 continue
-            x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-            detections.append(
-                Detection(
-                    class_id=class_id,
-                    class_name=self.class_names.get(class_id, str(class_id)),
-                    confidence=confidence,
-                    bbox=(x1, y1, x2, y2),
-                )
-            )
-        return detections
+            tracked.append((int(track_id), detection))
+        return tracked
+
+    def reset_tracker(self) -> None:
+        """Drop all ByteTrack state; the next :meth:`track` call starts fresh IDs.
+
+        Implemented by running the next ``track`` call with
+        ``persist=False``, which makes Ultralytics create new trackers
+        instead of reusing the old ones.
+        """
+        self._tracker_reset_pending = True
+
+    def _boxes_to_detections(self, boxes: object) -> List[Detection]:
+        if boxes is None:
+            return []
+        return [
+            self._box_to_detection(box)
+            for box in boxes
+            if float(box.conf[0]) >= self.threshold_for(int(box.cls[0]))
+        ]
+
+    def _box_to_detection(self, box: object) -> Detection:
+        class_id = int(box.cls[0])
+        x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+        return Detection(
+            class_id=class_id,
+            class_name=self.class_names.get(class_id, str(class_id)),
+            confidence=float(box.conf[0]),
+            bbox=(x1, y1, x2, y2),
+        )
