@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """SENTINEL - YOLOv8s weapon detector training (FR-02).
 
 Fine-tunes YOLOv8s on the curated weapon dataset (Gun / Knife), evaluates the

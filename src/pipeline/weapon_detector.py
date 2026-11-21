@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """YOLOv8 weapon detector (FR-02).
 
 Thin wrapper around the fine-tuned YOLOv8s model. Class names are read from

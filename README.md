@@ -164,6 +164,10 @@ npm run dev
 
 ---
 
-## 📄 License & Academic Usage
+## 📄 License & Intellectual Property
 
-This project is developed as an academic Final Year Project (FYP) at **FAST-NUCES Karachi Campus**. All rights reserved by the project team.
+This project is developed as an academic Final Year Project (FYP) at **FAST-NUCES Karachi Campus**.
+
+* **Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi.** The source code and documentation in this repository are released under the [MIT License](LICENSE).
+* **Trained model weights and datasets are not part of this repository.** They are kept private and are excluded from version control (see `.gitignore`). The code is open; the trained models and curated data are not.
+* **Third-party software** used by this project (YOLOv8, PyTorch, OpenCV, OpenVINO, NumPy) is listed with its licence in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).

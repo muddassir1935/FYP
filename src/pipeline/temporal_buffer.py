@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Temporal consistency buffer (FR-05).
 
 Pure-Python smoothing layer between per-frame detections and threat alerts.
