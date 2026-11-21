@@ -68,6 +68,7 @@ WINDOW_NAME = "SENTINEL - Weapon Detection Demo"
 from src.pipeline import (
     Detection,
     FrameSource,
+    RollingFps,
     TrackClassVoter,
     TrackedDetection,
     WeaponDetector,
@@ -318,6 +319,7 @@ class InferenceWorker(threading.Thread):
         self._lock = threading.Lock()
         self._detections: list[Detection] = []
         self._confirmed: list[TrackedDetection] = []
+        self._fps_counter = RollingFps()
         self._fps = 0.0
         self._last_snapshot_at: dict[int, float] = {}
 
@@ -333,7 +335,6 @@ class InferenceWorker(threading.Thread):
 
     def run(self) -> None:
         last_index = 0
-        last_tick = 0.0
         while not self._stop_event.is_set():
             if self._reset_requested.is_set():
                 self._reset_requested.clear()
@@ -353,10 +354,7 @@ class InferenceWorker(threading.Thread):
                 time.sleep(0.002)
                 continue
             tick = time.monotonic()
-            if last_tick:
-                instant = 1.0 / max(tick - last_tick, 1e-6)
-                self._fps = instant if self._fps == 0.0 else 0.9 * self._fps + 0.1 * instant
-            last_tick = tick
+            self._fps = self._fps_counter.tick(tick)
             last_index = frame_index
 
             try:
@@ -438,8 +436,8 @@ def main() -> int:
     writer = None
     writer_failed = False
     display_fps = 0.0
+    display_fps_counter = RollingFps()
     last_shown_index = 0
-    last_show_tick = 0.0
     with FrameSource(source, loop_file=args.loop) as stream:
         worker = InferenceWorker(
             stream,
@@ -457,14 +455,7 @@ def main() -> int:
                     frame_index, _ts, frame = packet
                     last_shown_index = frame_index
                     tick = time.monotonic()
-                    if last_show_tick:
-                        instant = 1.0 / max(tick - last_show_tick, 1e-6)
-                        display_fps = (
-                            instant
-                            if display_fps == 0.0
-                            else 0.9 * display_fps + 0.1 * instant
-                        )
-                    last_show_tick = tick
+                    display_fps = display_fps_counter.tick(tick)
 
                     detections, confirmed, inference_fps = worker.latest()
                     display = draw_annotations(

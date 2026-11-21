@@ -2,6 +2,7 @@
 """SENTINEL real-time pipeline: capture -> detect -> temporal confirm."""
 
 from .capture import FrameSource
+from .rolling_fps import RollingFps
 from .temporal_buffer import ConfirmedDetection, TemporalConsistencyBuffer, bbox_iou
 from .track_voting import TrackClassVoter, TrackedDetection
 from .weapon_detector import Detection, WeaponDetector
@@ -13,6 +14,7 @@ __all__ = [
     "TemporalConsistencyBuffer",
     "ConfirmedDetection",
     "bbox_iou",
+    "RollingFps",
     "TrackClassVoter",
     "TrackedDetection",
 ]
