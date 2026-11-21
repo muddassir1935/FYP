@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Standalone weapon-detection demo (FYP-I).
 
 Runs the SENTINEL weapon pipeline on a webcam, a video file, or an RTSP

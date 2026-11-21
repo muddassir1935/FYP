@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """SENTINEL real-time pipeline: capture -> detect -> temporal confirm."""
 
 from .capture import FrameSource

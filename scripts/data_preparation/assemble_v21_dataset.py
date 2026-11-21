@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Assemble the SENTINEL weapon_yolo_v2.1 fine-tune dataset.
 
 Mixes the v2.1 hard-example pool (mined frames + Roboflow knife images)

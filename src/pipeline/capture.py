@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Threaded frame capture (FR-01).
 
 Wraps OpenCV ``VideoCapture`` (webcam index, video file path, or RTSP URL)

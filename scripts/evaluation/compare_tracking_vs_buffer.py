@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Compare ByteTrack + track voting against the 6-of-10 buffer on one clip.
 
 Runs the SAME clip twice with the SAME model and confidence threshold

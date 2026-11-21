@@ -1,3 +1,4 @@
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Track-level class voting for ByteTrack-confirmed weapons.
 
 ByteTrack (Ultralytics ``model.track(..., tracker="bytetrack.yaml")``)

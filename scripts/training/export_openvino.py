@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """Export the trained weapon model to OpenVINO format (Intel hardware).
 
 OpenVINO is Intel's inference toolkit — NOT a different model. It converts

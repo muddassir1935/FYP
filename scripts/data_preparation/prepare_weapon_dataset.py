@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """
 SENTINEL — Weapon Detection Preprocessing & Augmentation Pipeline (YOLOv8s)
 ==========================================================================
