@@ -132,6 +132,9 @@ scratch/
 tmp/
 temp/
 *.tmp
+
+# 9. Demo outputs (written by the CLI demo and the demo web UI)
+snapshots/
 pdf_text.txt
 ~$*.docx
 ~$*.pptx

@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Muddassir Rizwan, Faiz Hussain, Qaim Mehdi. Licensed under the MIT License.
 """SENTINEL real-time pipeline: capture -> detect -> temporal confirm."""
 
+from .annotate import draw_annotations
 from .capture import FrameSource
+from .demo_worker import InferenceWorker
 from .rolling_fps import RollingFps
 from .temporal_buffer import ConfirmedDetection, TemporalConsistencyBuffer, bbox_iou
 from .track_voting import TrackClassVoter, TrackedDetection
@@ -17,4 +19,6 @@ __all__ = [
     "RollingFps",
     "TrackClassVoter",
     "TrackedDetection",
+    "InferenceWorker",
+    "draw_annotations",
 ]

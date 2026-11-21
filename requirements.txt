@@ -1,0 +1,20 @@
+# SENTINEL — Python dependencies for the weapon pipeline + demo web UI.
+# Pinned to the versions tested on 2026-11-21 (Python 3.12, CPU).
+# Weights are never in Git: download best.pt (or an OpenVINO export)
+# from Drive SENTINEL_FYP/runs/ into models/weights/ (see
+# docs/training_run_log.md).
+
+# Inference
+ultralytics==8.4.215
+opencv-python==5.0.0
+numpy==2.4.6
+torch==2.15.0+cpu
+# NOTE: the +cpu torch build above is for CPU-only machines. On a CUDA
+# machine, install torch for your CUDA version from pytorch.org first,
+# then install the rest of this file.
+
+# Demo web UI (FastAPI backend + TestClient)
+fastapi==0.115.6
+uvicorn==0.54.0
+python-multipart==0.0.34
+httpx==0.28.1

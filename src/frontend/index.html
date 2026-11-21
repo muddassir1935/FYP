@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SENTINEL — Demo Console</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-name">SENTINEL</span>
+    <span class="brand-sub">Demo Console</span>
+  </div>
+  <div class="topbar-right">
+    <span id="state-pill" class="pill pill-idle">Idle</span>
+    <span id="elapsed" class="elapsed mono">00:00</span>
+    <button id="btn-stop" class="btn btn-danger" disabled>Stop run</button>
+  </div>
+</header>
+
+<div id="backend-banner" class="banner banner-error" hidden>
+  Backend unreachable — is the server still running? Retrying…
+</div>
+<div id="error-box" class="banner banner-error" hidden></div>
+
+<main class="layout">
+  <section class="video-col">
+    <div id="video-panel" class="video-panel">
+      <div id="video-placeholder" class="video-placeholder">
+        <p class="placeholder-title">No run active</p>
+        <p class="placeholder-text">Pick a source and weights, then press Start run.</p>
+      </div>
+      <img id="stream" class="stream" alt="Annotated detection stream" hidden>
+      <div id="alert-banner" class="alert-banner" hidden>
+        <span class="alert-dot" aria-hidden="true"></span>
+        <span id="alert-text">Confirmed threat</span>
+      </div>
+      <div class="video-tools">
+        <span id="rec-badge" class="rec-badge" hidden><span class="rec-dot"></span>REC</span>
+        <button id="btn-fullscreen" class="btn btn-ghost" title="Fullscreen video">Fullscreen</button>
+      </div>
+    </div>
+
+    <div class="stats mono" aria-live="off">
+      <span>FPS <b id="stat-display-fps">—</b></span>
+      <span>detect <b id="stat-detect-fps">—</b></span>
+      <span>frame <b id="stat-frames">—</b></span>
+      <span>now <b id="stat-detections">—</b></span>
+      <span>confirmed <b id="stat-confirmed">—</b></span>
+      <span>snapshots <b id="stat-snapshots">—</b></span>
+    </div>
+
+    <section class="snapshots" aria-label="Confirmed threat snapshots">
+      <div class="section-head">
+        <h2>Snapshots</h2>
+        <button id="btn-clear-snapshots" class="btn btn-ghost btn-small">Clear all</button>
+      </div>
+      <p id="snapshots-empty" class="muted">No confirmed threats yet — snapshots appear here.</p>
+      <div id="snapshots-grid" class="snapshots-grid"></div>
+    </section>
+  </section>
+
+  <aside class="controls" aria-label="Run controls">
+    <form id="run-form">
+      <fieldset>
+        <legend>Source</legend>
+        <label class="radio"><input type="radio" name="source-type" value="video" checked> Video file</label>
+        <label class="radio"><input type="radio" name="source-type" value="webcam"> Webcam</label>
+        <label class="field-label" for="video-select">Video</label>
+        <select id="video-select" name="video"></select>
+        <p id="no-videos" class="muted" hidden>No videos in <code>videos/</code> yet — upload one below.</p>
+        <label class="field-label" for="webcam-index">Camera index</label>
+        <input id="webcam-index" name="webcam-index" type="number" value="0" min="0" max="9" disabled>
+        <label class="btn btn-ghost file-btn">Upload clip
+          <input id="upload-input" type="file" accept="video/*" hidden>
+        </label>
+        <p id="upload-status" class="muted" aria-live="polite"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Weights</legend>
+        <label class="field-label" for="weights-select">Model</label>
+        <select id="weights-select" name="weights"></select>
+        <p id="no-weights" class="muted" hidden>No weights in <code>models/weights/</code> — place a <code>.pt</code> file or an OpenVINO folder there.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Thresholds</legend>
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="conf-gun">Gun</label>
+            <input id="conf-gun" name="conf-gun" type="number" value="0.44" min="0.05" max="1" step="0.01">
+          </div>
+          <div>
+            <label class="field-label" for="conf-knife">Knife</label>
+            <input id="conf-knife" name="conf-knife" type="number" value="0.43" min="0.05" max="1" step="0.01">
+          </div>
+        </div>
+        <p class="muted">Val-tuned operating point for the v2 weights. Lower values catch more — and false-alarm more.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Options</legend>
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="imgsz">Image size</label>
+            <input id="imgsz" name="imgsz" type="number" value="640" min="320" max="1280" step="32">
+          </div>
+          <div>
+            <label class="field-label" for="min-hits">Min hits</label>
+            <input id="min-hits" name="min-hits" type="number" value="3" min="1" max="30" step="1">
+          </div>
+        </div>
+        <label class="check"><input id="opt-loop" type="checkbox"> Loop video</label>
+        <label class="check"><input id="opt-hide" type="checkbox"> Hide unconfirmed boxes</label>
+        <label class="check"><input id="opt-save" type="checkbox"> Save annotated video</label>
+        <label class="check"><input id="opt-sound" type="checkbox"> Siren on confirmed threat</label>
+      </fieldset>
+
+      <button id="btn-start" type="submit" class="btn btn-primary btn-block">Start run</button>
+      <p id="run-status-line" class="muted" aria-live="polite"></p>
+    </form>
+  </aside>
+</main>
+
+<dialog id="snapshot-dialog">
+  <img id="snapshot-full" alt="Snapshot enlarged">
+  <p id="snapshot-caption" class="muted"></p>
+  <button id="snapshot-close" class="btn btn-ghost">Close</button>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

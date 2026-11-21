@@ -153,6 +153,28 @@ npm run dev
 
 ---
 
+## 🖥️ Demo Web UI (FYP-I)
+
+No terminal flags needed — pick a video or webcam, pick weights, press
+Start. One command from the repo root:
+
+```bash
+pip install -r requirements.txt
+python scripts/run_demo_ui.py
+```
+
+Then open http://127.0.0.1:8000 (the browser opens automatically).
+Put clips in `videos/` and weights (`.pt` or an `*_openvino_model`
+folder) in `models/weights/` first — or upload a clip from the UI.
+
+The UI is a single vanilla page (no build step, no webfonts): live
+annotated stream with fullscreen, FPS + detection stats, a confirmed-
+threat alert banner with an optional siren, and a snapshot gallery.
+Plan, API, and design: `docs/demo_ui_plan.md`. The CLI demo still
+works unchanged: `python scripts/inference/run_weapon_demo.py --help`.
+
+---
+
 ## 👥 FYP Team
 
 * **Muddassir Rizwan** (`23K-0784`) — *ML/AI Model Development (Lead)*  
