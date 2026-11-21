@@ -52,7 +52,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -68,10 +67,12 @@ WINDOW_NAME = "SENTINEL - Weapon Detection Demo"
 from src.pipeline import (
     Detection,
     FrameSource,
+    InferenceWorker,
     RollingFps,
     TrackClassVoter,
     TrackedDetection,
     WeaponDetector,
+    draw_annotations,
 )
 
 # Val-tuned operating point for the v2 weights (Gun: constrained
@@ -81,9 +82,6 @@ DEFAULT_CONF_GUN = 0.44
 DEFAULT_CONF_KNIFE = 0.43
 # Generic fallback for any class without a per-class threshold.
 DEFAULT_CONF = 0.40
-
-SNAPSHOT_COOLDOWN_SECONDS = 5.0
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SENTINEL weapon demo (FR-02 + FR-05)")
@@ -200,56 +198,6 @@ def resolve_thresholds(args: argparse.Namespace) -> tuple[float, float, float]:
     return conf_gun, conf_knife, fallback_conf
 
 
-def draw_annotations(
-    cv2_module: object,
-    frame: object,
-    detections: list[Detection],
-    confirmed: list[TrackedDetection],
-    *,
-    hide_unconfirmed: bool = False,
-) -> object:
-    """Return a copy of ``frame`` with detection/confirmation boxes drawn.
-
-    Confirmed threats are thick red with a filled label chip showing the
-    track ID, sighting count and vote share; unconfirmed tracks are thin
-    muted gray (raw model output always contains some noise — the
-    track-vote confirmation is the system's actual verdict). Every box
-    already carries its track's voted label, so one object keeps one
-    label across frames.
-    """
-    display = frame.copy()
-    confirmed_by_id = {id(cd.detection): cd for cd in confirmed}
-    font = cv2_module.FONT_HERSHEY_SIMPLEX
-    for det in detections:
-        cd = confirmed_by_id.get(id(det))
-        if cd is None and hide_unconfirmed:
-            continue
-        x1, y1, x2, y2 = (int(v) for v in det.bbox)
-        if cd is not None:
-            color, thickness = (0, 0, 255), 3
-            label = (
-                f"{det.class_name} {det.confidence:.2f} CONFIRMED "
-                f"t{cd.track_id} {cd.hits}f vote {cd.vote_share:.2f}"
-            )
-        else:
-            color, thickness = (170, 170, 170), 1
-            label = f"{det.class_name} {det.confidence:.2f}"
-        cv2_module.rectangle(display, (x1, y1), (x2, y2), color, thickness)
-        (text_w, text_h), baseline = cv2_module.getTextSize(label, font, 0.55, 2)
-        chip_h = text_h + baseline + 6
-        chip_y1 = y1 - chip_h if y1 >= chip_h else y1
-        chip_y2 = chip_y1 + chip_h
-        # Clamp the chip inside the frame: near the right edge the label
-        # would otherwise run off-screen and get cut.
-        chip_x = min(x1, max(0, display.shape[1] - text_w - 8))
-        cv2_module.rectangle(display, (chip_x, chip_y1), (chip_x + text_w + 8, chip_y2), color, -1)
-        cv2_module.putText(
-            display, label, (chip_x + 4, chip_y2 - baseline - 3),
-            font, 0.55, (255, 255, 255), 2, cv2_module.LINE_AA,
-        )
-    return display
-
-
 def draw_hud(
     cv2_module: object,
     frame: object,
@@ -287,121 +235,6 @@ def fit_for_display(cv2_module: object, frame: object, max_width: int, max_heigh
     new_size = (max(1, int(width * scale)), max(1, int(height * scale)))
     interpolation = cv2_module.INTER_AREA if scale < 1.0 else cv2_module.INTER_LINEAR
     return cv2_module.resize(frame, new_size, interpolation=interpolation)
-
-
-class InferenceWorker(threading.Thread):
-    """Runs detection + ByteTrack tracking + class voting on the newest frames.
-
-    Owns the detector and the voter (single-threaded access, no locking
-    around them) and publishes the latest result for the display loop.
-    Snapshots are saved here, from the frame that was actually analysed.
-    """
-
-    def __init__(
-        self,
-        stream: FrameSource,
-        detector: WeaponDetector,
-        voter: TrackClassVoter,
-        *,
-        cv2_module: object,
-        tracker: str,
-        snapshots_dir: Path | None,
-    ) -> None:
-        super().__init__(name="sentinel-inference", daemon=True)
-        self._stream = stream
-        self._detector = detector
-        self._voter = voter
-        self._cv2 = cv2_module
-        self._tracker = tracker
-        self._snapshots_dir = snapshots_dir
-        self._stop_event = threading.Event()
-        self._reset_requested = threading.Event()
-        self._lock = threading.Lock()
-        self._detections: list[Detection] = []
-        self._confirmed: list[TrackedDetection] = []
-        self._fps_counter = RollingFps()
-        self._fps = 0.0
-        self._last_snapshot_at: dict[int, float] = {}
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def request_reset(self) -> None:
-        self._reset_requested.set()
-
-    def latest(self) -> tuple[list[Detection], list[TrackedDetection], float]:
-        with self._lock:
-            return self._detections, self._confirmed, self._fps
-
-    def run(self) -> None:
-        last_index = 0
-        while not self._stop_event.is_set():
-            if self._reset_requested.is_set():
-                self._reset_requested.clear()
-                self._detector.reset_tracker()
-                self._voter.reset()
-                print("Tracker and class voter reset.")
-            packet = self._stream.read()
-            if packet is None:
-                if self._stream.ended:
-                    break
-                time.sleep(0.003)
-                continue
-            frame_index, _ts, frame = packet
-            if frame_index == last_index:
-                if self._stream.ended:
-                    break
-                time.sleep(0.002)
-                continue
-            tick = time.monotonic()
-            self._fps = self._fps_counter.tick(tick)
-            last_index = frame_index
-
-            try:
-                tracked = self._voter.update(
-                    self._detector.track(frame, tracker=self._tracker)
-                )
-            except Exception as exc:  # fail loudly instead of freezing silently
-                print(f"Inference error, stopping detection: {exc}")
-                break
-            detections = [t.detection for t in tracked]
-            confirmed = [t for t in tracked if t.confirmed]
-            with self._lock:
-                self._detections = detections
-                self._confirmed = confirmed
-            self._save_snapshots(frame, detections, confirmed)
-
-    def _save_snapshots(
-        self,
-        frame: object,
-        detections: list[Detection],
-        confirmed: list[TrackedDetection],
-    ) -> None:
-        if self._snapshots_dir is None or not confirmed:
-            return
-        now = time.monotonic()
-        fresh = [
-            cd
-            for cd in confirmed
-            if now - self._last_snapshot_at.get(cd.track_id, 0.0)
-            >= SNAPSHOT_COOLDOWN_SECONDS
-        ]
-        if not fresh:
-            return
-        annotated = draw_annotations(self._cv2, frame, detections, confirmed)
-        for cd in fresh:
-            self._last_snapshot_at[cd.track_id] = now
-            stamp = time.strftime("%Y%m%d_%H%M%S")
-            path = (
-                self._snapshots_dir
-                / f"threat_{cd.detection.class_name}_{stamp}_t{cd.track_id}.jpg"
-            )
-            self._cv2.imwrite(str(path), annotated)
-            print(
-                f"[ALERT] {cd.detection.class_name} confirmed "
-                f"(track {cd.track_id}, {cd.hits} frames, "
-                f"vote {cd.vote_share:.2f}) - snapshot: {path}"
-            )
 
 
 def main() -> int:

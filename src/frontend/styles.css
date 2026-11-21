@@ -1,0 +1,261 @@
+/* SENTINEL Demo Console — dark ops console. Vanilla CSS, no webfonts
+   (the demo must work offline on the jury laptop). */
+
+:root {
+  --bg: #0a0e14;
+  --panel: #11161f;
+  --raised: #1a212c;
+  --border: #232c3a;
+  --text: #e6eaf0;
+  --muted: #8b94a3;
+  --threat: #e5484d;
+  --ok: #46a758;
+  --warn: #f5a524;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --font: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+/* The `hidden` attribute must win over component display rules
+   (e.g. .alert-banner is display:flex): without this, "hidden"
+   elements stay visible — the alert banner and REC badge showed on
+   the idle page in the first walkthrough. */
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.mono, code { font-family: var(--mono); }
+.muted { color: var(--muted); font-size: 13px; }
+button, input, select { font: inherit; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid var(--warn);
+  outline-offset: 2px;
+}
+
+/* --- top bar --- */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand-mark {
+  width: 12px; height: 12px;
+  background: var(--threat);
+  border-radius: 2px;
+  align-self: center;
+}
+.brand-name { font-weight: 700; letter-spacing: 0.14em; font-size: 17px; }
+.brand-sub { color: var(--muted); font-size: 13px; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.elapsed { color: var(--muted); font-size: 14px; }
+
+.pill {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--raised);
+}
+.pill-running { color: var(--ok); border-color: var(--ok); }
+.pill-error { color: var(--threat); border-color: var(--threat); }
+.pill-stopped { color: var(--warn); border-color: var(--warn); }
+
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; }
+  .brand-sub { display: none; }
+  .topbar-right { flex-wrap: wrap; }
+}
+
+/* --- buttons --- */
+.btn {
+  border: 1px solid var(--border);
+  background: var(--raised);
+  color: var(--text);
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) { border-color: var(--muted); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--ok); border-color: var(--ok); color: #06130a; font-weight: 600; }
+.btn-primary:hover:not(:disabled) { border-color: var(--ok); filter: brightness(1.1); }
+.btn-danger { background: transparent; border-color: var(--threat); color: var(--threat); }
+.btn-ghost { background: transparent; }
+.btn-small { padding: 5px 10px; font-size: 13px; }
+.btn-block { width: 100%; padding: 11px; margin-top: 4px; }
+.file-btn { display: inline-block; margin-top: 8px; }
+
+/* --- banners --- */
+.banner {
+  padding: 10px 20px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.banner-error { background: #2a1215; color: #ffb3b5; }
+
+/* --- layout --- */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  padding: 16px 20px 28px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+@media (max-width: 1100px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* --- video panel --- */
+.video-panel {
+  position: relative;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+.video-panel:fullscreen { border: none; border-radius: 0; }
+.video-placeholder {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  text-align: center; padding: 24px;
+}
+.placeholder-title { font-size: 18px; font-weight: 600; margin: 0 0 6px; }
+.placeholder-text { color: var(--muted); margin: 0; }
+.stream {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.video-tools {
+  position: absolute; right: 10px; bottom: 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.rec-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: rgba(0, 0, 0, 0.7);
+  border: 1px solid var(--threat);
+  color: var(--threat);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+  padding: 4px 8px; border-radius: var(--radius-sm);
+}
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--threat); }
+@media (prefers-reduced-motion: no-preference) {
+  .rec-dot { animation: blink 1.2s steps(2, start) infinite; }
+  @keyframes blink { to { visibility: hidden; } }
+}
+
+/* The alert banner is the one bold element: red means confirmed threat,
+   never decoration. */
+.alert-banner {
+  position: absolute; left: 0; right: 0; top: 0;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--threat);
+  color: #fff;
+  font-weight: 600;
+  padding: 10px 16px;
+}
+.alert-dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; flex: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .alert-dot { animation: blink 1s steps(2, start) infinite; }
+}
+
+/* --- stats strip --- */
+.stats {
+  display: flex; flex-wrap: wrap; gap: 8px 24px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 13px;
+}
+.stats b { color: var(--text); font-weight: 600; }
+
+/* --- snapshots --- */
+.snapshots { margin-top: 20px; }
+.section-head {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.section-head h2 { font-size: 16px; margin: 0; }
+.snapshots-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.snapshot-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+}
+.snapshot-card img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; }
+.snapshot-meta { padding: 8px 10px; font-size: 13px; }
+.snapshot-meta .thumb-class { font-weight: 600; }
+.snapshot-meta .thumb-time { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+/* --- control panel --- */
+.controls {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  align-self: start;
+}
+.controls fieldset {
+  border: none; border-bottom: 1px solid var(--border);
+  padding: 0 0 14px; margin: 0 0 14px;
+}
+.controls fieldset:last-of-type { border-bottom: none; }
+.controls legend { font-weight: 600; padding: 0; margin-bottom: 10px; }
+.field-label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+.controls select, .controls input[type="number"] {
+  width: 100%;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.controls input:disabled, .controls select:disabled { opacity: 0.45; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.radio, .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+.radio input, .check input { accent-color: var(--ok); }
+
+/* --- snapshot dialog --- */
+dialog {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  max-width: min(90vw, 900px);
+  padding: 16px;
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.75); }
+dialog img { width: 100%; display: block; border-radius: var(--radius-sm); }
+dialog .btn { margin-top: 12px; }
