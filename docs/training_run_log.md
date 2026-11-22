@@ -151,6 +151,68 @@ Adopted as the current working model (v3).
 - **Next:** field re-test on the same bullet/webcam videos + alarm count
   (before: 177 alarms / 15 min); demo prep for the 5 Dec review.
 
+### #7 — v4ft fine-tune (2026-11-21) — GATE FAIL
+8-epoch fine-tune from v3 best.pt (lr0 0.001) on dataset v4ft: train 4,145
+(4,000 clean v3 replay minus the 897 Stage-1 audit exclusions + 145
+user-reviewed Test8/Test9 hard frames — 13 Gun + 17 Knife positives, 115
+negatives). The fine-tune hypothesis was re-tested after the v3 full
+retrain: v3 was already trained on mixed data, so fine-tuning it on a
+small addition should be a much smaller distribution shift than v2.1/v2.2
+faced. It still failed. Clean frozen test REGRESSED (0.8666 → 0.751);
+cleaned test 0.8378 → **0.709** (−12.9 pts); hard frames F1 0.860 → 0.737
+— worse than v2.1's 0.805 too. Third confirmation that fine-tuning on a
+small new set + replay trades clean accuracy for hard-frame robustness:
+the new frames were 27% of each epoch's exposures (x10 oversample) and
+115/145 of them were negatives, so the model learned "fire less overall".
+BUT the new data itself works: on the Test8/Test9 frames v4ft scored
+F1 **0.949** vs v3's 0.344 (1 FP on 126 negatives vs v3's 47) — the
+recipe was wrong, not the data.
+
+- Weights: `weapon_yolov8s_v4ft_20261121_1230_best.pt` (22.52 MB)
+- SHA-256: `0a29654153c9d4c92c7b64101c0f210525fcd84a4eb2294e23917e9857e0adce`
+- Drive: not uploaded (superseded; local copy only).
+- **Lesson:** fine-tuning is done for this problem — three recipes, three
+  failures (v2.1, v2.2, v4ft). The Test8/Test9 data goes into the next
+  FULL retrain at natural frequency instead.
+
+### #8 — v4 full retrain (2026-11-22) — GATE MIXED, v3 stays
+100-epoch full retrain from COCO yolov8s.pt on the audit-cleaned dataset
+v4: train 23,268 = 23,123 clean v3 replay (after the Stage-1 + Stage-2
+audits: 897 + 139 drops with 13 overlap, 25 flips, 26 adds, 5 reboxes)
++ 145 Test8/Test9 frames at natural frequency; Knife 2x oversampling ON;
+val 1,351 / test 680 FROZEN. Trained on Kaggle (2x T4, DDP) in ~8.9 h.
+The gate came back MIXED, so **v3 stays the working model** and v4
+adoption waits on the live re-test.
+
+- Weights: `weapon_yolov8s_v4_20261121_1350_best.pt` (22.53 MB)
+- SHA-256: `8de382e8bc8e8b6959b52a9c08a6dd962042d0f3a7a11ce2b32995d1fcbba20f`
+- Drive: `SENTINEL_FYP/runs/weapon_yolov8s_v4_20261121_1350/`
+  (best.pt id `1dpd5lBcx-VE17JxGV5RVagNTQHIby2IB`)
+- **Result:** cleaned test mAP@0.5 **0.8081** vs v3's 0.8378 (−3.0 pts,
+  recall-driven: R 0.7616 vs 0.7869, P slightly up 0.8272 vs 0.8222).
+  Gun AP50 0.7335 vs 0.7558; Knife AP50 0.8827 vs 0.9198. The frozen-test
+  comparison (0.8293 vs 0.8666) is NOT honest — 25% of that test set
+  leaks into v3's training data, and v4 never saw the leaked images.
+- **Hard frames (1,456 old, conf 0.40):** F1 **0.863** vs v3's 0.860 —
+  TIED. Unseen split (616 frames): 0.644 vs 0.667 — slightly worse, no
+  generalization gain. New Test8/Test9 frames (156): F1 0.794 vs 0.344,
+  FPs 47 → 11 — but v4 TRAINED on 145 of these, so this is memorization
+  + learning, not proof. Test9 detail: Gun FPs 17 → 0; bullet FPs 9 → 3
+  (reduced, not eliminated).
+- **Per-slice (cleaned test, conf 0.25):** overall F1 0.756 vs 0.773.
+  Gun recall drops in EVERY slice. Bright-light Knife precision is
+  IDENTICAL to v3 (0.340, same 31 FPs) — v4 did not fix it. Small-Gun
+  recall 0.603 vs 0.637 — worse. Thresholds re-tuned for v4 (Gun 0.36,
+  Knife 0.37, val mAP50 0.8482) but the demo stays at 0.40: val has no
+  hard negatives, so val-optimal is not field-optimal.
+- **Not fixed:** UCF tiny/dark guns (TP 5/17 vs v3's 6/17); bright-light
+  Knife FPs; bullet FPs (3 remain).
+- **Lesson:** the decontamination cost is now quantified — removing 1,023
+  train images (audit drops) cost ~3 pts of cleaned-test mAP, while
+  hard-frame performance held. The next improvement round is dataset +
+  strategy work (small-gun data, bright-light negatives, imgsz sweep),
+  not another same-recipe retrain.
+
 ### Error analysis — baseline v1 (2026-11-09, from the val confusion matrix)
 
 - Gun<->Knife cross-confusion is negligible (12 Gun predicted as Knife,
@@ -172,6 +234,9 @@ Adopted as the current working model (v3).
   close-ups — all as background) plus retraining.
 
 ### Next
-v3 adopted as the working model. Field re-test on the same bullet/webcam
-videos + alarm count, then demo prep and rehearsal for the 5 Dec FYP-I
-review, then the FYP-I report (Ch 6 holds the weapon-module results).
+v3 stays the working model (v4 gate mixed; adoption waits on the live
+re-test). Next improvement round is dataset + strategy work — small-gun
+data, bright-light hard negatives, and the imgsz sweep — then a v5
+retrain on next week's Kaggle quota. After that: live re-test, demo prep
+and rehearsal for the 5 Dec FYP-I review, then the FYP-I report (Ch 6
+holds the weapon-module results).
