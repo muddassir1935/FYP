@@ -45,6 +45,10 @@ const els = {
 
 const state = {
   running: false,
+  // True while a POST /api/run/start request is in flight from this tab.
+  // Prevents a concurrent 500 ms status poll from overwriting the
+  // "Starting" UI with the previous "stopped"/"idle" status.
+  starting: false,
   // Whether the <img> is attached to the current run's MJPEG stream.
   // Reset on every stop: the backend stream ends when a run stops,
   // and the <img> otherwise keeps showing the dead stream's last
@@ -182,15 +186,23 @@ function playSiren() {
 
 // --- run control --------------------------------------------------------
 
-function setRunningUI(running) {
+function setRunningUI(running, starting = false) {
   state.running = running;
-  els.btnStart.disabled = running || els.weightsSelect.disabled || state.serverDown;
+  const busy = running || starting;
+  els.btnStart.disabled = busy || els.weightsSelect.disabled || state.serverDown;
   els.btnStop.disabled = !running;
   for (const el of els.runForm.querySelectorAll("input, select")) {
     if (el.id === "opt-sound") continue; // siren toggle stays usable
-    el.disabled = running;
+    el.disabled = busy;
   }
   els.recBadge.hidden = !(running && $("opt-save").checked);
+}
+
+function setPlaceholderText(title, text) {
+  const titleEl = els.placeholder.querySelector(".placeholder-title");
+  const textEl = els.placeholder.querySelector(".placeholder-text");
+  if (titleEl) titleEl.textContent = title;
+  if (textEl) textEl.textContent = text;
 }
 
 function detachStream() {
@@ -205,9 +217,24 @@ function detachStream() {
 }
 
 function applyStatus(s) {
+  // Ignore stale pre-start polls while our own Start request is in flight.
+  if (state.starting && (s.state === "idle" || s.state === "stopped")) {
+    return;
+  }
+
   const pill = els.pill;
   pill.className = "pill";
-  if (s.state === "running") {
+  if (s.state === "starting") {
+    pill.classList.add("pill-starting");
+    pill.textContent = "Starting";
+    setRunningUI(false, true);
+    detachStream();
+    setPlaceholderText(
+      "Starting run…",
+      "Loading and warming up the model so frame 1 runs at full speed."
+    );
+    els.runStatusLine.textContent = "Starting — warming up model…";
+  } else if (s.state === "running") {
     pill.classList.add("pill-running");
     pill.textContent = "Running";
     setRunningUI(true);
@@ -222,12 +249,14 @@ function applyStatus(s) {
     pill.textContent = "Error";
     setRunningUI(false);
     detachStream();
+    setPlaceholderText("No run active", "Pick a source and weights, then press Start run.");
     showError(s.error || "The run failed. Check the server log for details.");
   } else if (s.state === "stopped") {
     pill.classList.add("pill-stopped");
     pill.textContent = "Stopped";
     setRunningUI(false);
     detachStream();
+    setPlaceholderText("No run active", "Pick a source and weights, then press Start run.");
     els.runStatusLine.textContent = s.saved_video
       ? `Run stopped. Video saved to ${s.saved_video}.`
       : "Run stopped.";
@@ -236,6 +265,7 @@ function applyStatus(s) {
     pill.textContent = "Idle";
     setRunningUI(false);
     detachStream();
+    setPlaceholderText("No run active", "Pick a source and weights, then press Start run.");
   }
 
   els.elapsed.textContent = fmtElapsed(s.elapsed_s);
@@ -297,21 +327,32 @@ els.runForm.addEventListener("submit", async (event) => {
     hide_unconfirmed: $("opt-hide").checked,
     save_video: $("opt-save").checked,
   };
-  els.btnStart.disabled = true;
-  els.runStatusLine.textContent = "Starting… (loading the model takes a few seconds)";
+  state.starting = true;
+  applyStatus({
+    state: "starting",
+    elapsed_s: 0,
+    display_fps: 0,
+    detect_fps: 0,
+    frames: 0,
+    detections: 0,
+    confirmed: 0,
+    snapshots: state.lastSnapshotCount,
+  });
   try {
     const s = await api("/api/run/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+    state.starting = false;
     state.lastSnapshotCount = 0;
     els.runStatusLine.textContent = `Running: ${s.source_label} · ${s.weights_label}`;
     applyStatus(s);
   } catch (err) {
+    state.starting = false;
     showError(err.message);
     els.runStatusLine.textContent = "";
-    els.btnStart.disabled = false;
+    setRunningUI(false);
   }
 });
 

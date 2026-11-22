@@ -131,6 +131,16 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 409)
 
+    def test_run_start_conflict_when_starting(self) -> None:
+        self.runner._state = "starting"
+        res = self.client.post(
+            "/api/run/start",
+            json={"source_type": "video", "source": "clip.mp4",
+                  "weights_id": "best.pt"},
+        )
+        self.assertEqual(res.status_code, 409)
+        self.assertEqual(self.client.get("/api/run/status").json()["state"], "starting")
+
     def test_run_stop_when_idle(self) -> None:
         res = self.client.post("/api/run/stop")
         self.assertEqual(res.status_code, 200)

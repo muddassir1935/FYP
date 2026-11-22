@@ -122,10 +122,11 @@ class DemoRunner:
         """Start a run. Raises ValueError on a bad config, RuntimeError
         if a run is already active or the model cannot load."""
         with self._lock:
-            if self._state == "running":
+            if self._state in ("starting", "running", "paused"):
                 raise RuntimeError("A run is already active — stop it first.")
             weights_path = self._resolve_weights(config.weights_id)
             source = self._resolve_source(config)
+            self._state = "starting"
             self._config = config
             self._error = None
             self._saved_video = None
@@ -134,6 +135,8 @@ class DemoRunner:
             self._frame_seq = 0
             self._frames_shown = 0
             self._display_fps = 0.0
+            self._started_at = None
+            self._stopped_at = None
             self._stop_event.clear()
 
         # Model load happens outside the lock (it takes seconds) but

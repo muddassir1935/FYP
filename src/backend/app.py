@@ -146,7 +146,7 @@ def create_app(
     # -- run control ---------------------------------------------------
     @app.post("/api/run/start", response_model=RunStatus)
     def run_start(body: RunStartRequest):
-        if runner.state == "running":
+        if runner.state in ("starting", "running", "paused"):
             raise HTTPException(409, "A run is already active — stop it first.")
         config = RunConfig(
             source_type=body.source_type,

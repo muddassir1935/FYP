@@ -158,6 +158,27 @@ class TestValidation(RunnerTestCase):
         self.assertEqual(info.frames, 0)
         self.assertIsNone(info.error)
 
+    def test_start_sets_starting_state_before_loading_detector(self) -> None:
+        from unittest.mock import patch
+
+        (self.weights / "best.pt").write_bytes(b"fake")
+        (self.videos / "clip.mp4").write_bytes(b"fake")
+        observed_states: list[str] = []
+
+        def fake_detector(*_args, **_kwargs):
+            observed_states.append(self.runner.state)
+            # Concurrent start while starting must be rejected.
+            with self.assertRaises(RuntimeError):
+                self.runner.start(_cfg())
+            raise RuntimeError("boom during load")
+
+        with patch("src.backend.runner.WeaponDetector", side_effect=fake_detector):
+            with self.assertRaises(RuntimeError):
+                self.runner.start(_cfg())
+
+        self.assertEqual(observed_states, ["starting"])
+        self.assertEqual(self.runner.state, "error")
+
 
 if __name__ == "__main__":
     unittest.main()
