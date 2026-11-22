@@ -46,6 +46,42 @@ class Detection:
         return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
 
 
+def _ensure_directml_support() -> None:
+    """Ensure onnxruntime DirectML provider is used for .onnx models on Windows/AMD GPUs."""
+    import os
+
+    os.environ.setdefault("ULTRALYTICS_SKIP_REQUIREMENTS_CHECKS", "1")
+    try:
+        import onnxruntime as ort
+
+        available = ort.get_available_providers()
+        if (
+            "DmlExecutionProvider" in available
+            and not getattr(ort, "_sentinel_dml_patched", False)
+        ):
+            orig_session = ort.InferenceSession
+
+            def _dml_session(
+                path_or_bytes: object,
+                sess_options: object = None,
+                providers: Optional[List[Union[str, Tuple[str, Dict]]]] = None,
+                **kwargs: object,
+            ) -> object:
+                if providers is None or providers == ["CPUExecutionProvider"]:
+                    providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+                return orig_session(
+                    path_or_bytes,
+                    sess_options=sess_options,
+                    providers=providers,
+                    **kwargs,
+                )
+
+            ort.InferenceSession = _dml_session
+            ort._sentinel_dml_patched = True
+    except Exception:
+        pass
+
+
 class WeaponDetector:
     """Runs the weapon model on single frames.
 
@@ -97,6 +133,8 @@ class WeaponDetector:
         self.imgsz = imgsz
         self.device = device
         self._tracker_reset_pending = False
+        if weights_path.suffix.lower() == ".onnx":
+            _ensure_directml_support()
         self._model = YOLO(str(weights_path))
         names = self._model.names
         self.class_names: Dict[int, str] = (

@@ -54,13 +54,18 @@ class RunnerTestCase(unittest.TestCase):
 class TestListings(RunnerTestCase):
     def test_weights_lists_pt_and_openvino_only(self) -> None:
         (self.weights / "best.pt").write_bytes(b"x")
+        (self.weights / "best.onnx").write_bytes(b"x")
         (self.weights / "v3_openvino_model").mkdir()
         (self.weights / "notes.txt").write_text("not weights")
         (self.weights / "other_dir").mkdir()
         got = self.runner.list_weights()
         self.assertEqual(
             [(w["id"], w["kind"]) for w in got],
-            [("best.pt", "pytorch"), ("v3_openvino_model", "openvino")],
+            [
+                ("best.onnx", "directml"),
+                ("best.pt", "pytorch"),
+                ("v3_openvino_model", "openvino"),
+            ],
         )
 
     def test_weights_empty_when_dir_missing(self) -> None:

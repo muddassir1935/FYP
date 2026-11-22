@@ -333,7 +333,7 @@ class DemoRunner:
         return videos
 
     def list_weights(self) -> list[dict]:
-        """Available weights: .pt files and *_openvino_model folders."""
+        """Available weights: .pt files, .onnx (DirectML) files, and *_openvino_model folders."""
         if not self.weights_dir.is_dir():
             return []
         out = []
@@ -341,6 +341,10 @@ class DemoRunner:
             if path.is_file() and path.suffix.lower() == ".pt":
                 out.append(
                     {"id": path.name, "kind": "pytorch", "label": path.stem}
+                )
+            elif path.is_file() and path.suffix.lower() == ".onnx":
+                out.append(
+                    {"id": path.name, "kind": "directml", "label": path.stem}
                 )
             elif path.is_dir() and path.name.endswith("_openvino_model"):
                 out.append(

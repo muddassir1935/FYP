@@ -116,7 +116,12 @@ async function loadWeights() {
   for (const w of weights) {
     const opt = document.createElement("option");
     opt.value = w.id;
-    opt.textContent = w.kind === "openvino" ? `${w.label} (OpenVINO)` : `${w.label} (.pt)`;
+    opt.textContent =
+      w.kind === "openvino"
+        ? `${w.label} (OpenVINO)`
+        : w.kind === "directml"
+          ? `${w.label} (DirectML / AMD GPU)`
+          : `${w.label} (.pt)`;
     els.weightsSelect.appendChild(opt);
   }
   els.noWeights.hidden = weights.length > 0;
