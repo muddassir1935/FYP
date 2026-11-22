@@ -166,6 +166,9 @@ python scripts/run_demo_ui.py
 Then open http://127.0.0.1:8000 (the browser opens automatically).
 Put clips in `videos/` and weights (`.pt` or an `*_openvino_model`
 folder) in `models/weights/` first — or upload a clip from the UI.
+To stop the server, use the Stop server button at the bottom of the
+control panel (closing the tab does not stop the process), or Ctrl+C
+in the terminal.
 
 The UI is a single vanilla page (no build step, no webfonts): live
 annotated stream with fullscreen, FPS + detection stats, a confirmed-

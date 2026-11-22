@@ -58,6 +58,11 @@ def create_app(
 
     app = FastAPI(title="SENTINEL Demo Console", version="0.1.0")
     app.state.runner = runner
+    # The uvicorn Server object, when one owns this app. Set by
+    # scripts/run_demo_ui.py; stays None under a plain
+    # `uvicorn src.backend.app:main_app` launch, where /api/server/
+    # shutdown has nothing to signal and answers 409.
+    app.state.uvicorn_server = None
 
     # -- pages & static -----------------------------------------------
     @app.get("/", include_in_schema=False)
@@ -170,6 +175,26 @@ def create_app(
     @app.get("/api/run/status", response_model=RunStatus)
     def run_status():
         return RunStatus(**vars(runner.status()))
+
+    # -- server ---------------------------------------------------------
+    @app.post("/api/server/shutdown")
+    def server_shutdown():
+        """Stop the active run (if any) and shut the server down.
+
+        Closing the browser tab does not stop the process, so the
+        console needs its own off-switch. uvicorn finishes this
+        response, then exits gracefully on ``should_exit``.
+        """
+        runner.stop()
+        server = getattr(app.state, "uvicorn_server", None)
+        if server is None:
+            raise HTTPException(
+                409,
+                "This server was not started by run_demo_ui.py — "
+                "stop it from the terminal (Ctrl+C).",
+            )
+        server.should_exit = True
+        return {"status": "shutdown_requested"}
 
     # -- stream ---------------------------------------------------------
     @app.get("/api/stream", include_in_schema=False)

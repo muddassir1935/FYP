@@ -72,6 +72,17 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   border: 1px solid var(--border);
   background: var(--raised);
 }
+.server-footer {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.server-footer p { margin: 0; }
+
 .pill-running { color: var(--ok); border-color: var(--ok); }
 .pill-error { color: var(--threat); border-color: var(--threat); }
 .pill-stopped { color: var(--warn); border-color: var(--warn); }

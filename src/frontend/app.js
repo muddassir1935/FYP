@@ -9,6 +9,7 @@ const els = {
   elapsed: $("elapsed"),
   btnStop: $("btn-stop"),
   btnStart: $("btn-start"),
+  btnShutdown: $("btn-shutdown"),
   backendBanner: $("backend-banner"),
   errorBox: $("error-box"),
   placeholder: $("video-placeholder"),
@@ -44,13 +45,20 @@ const els = {
 
 const state = {
   running: false,
-  hasStreamed: false,
+  // Whether the <img> is attached to the current run's MJPEG stream.
+  // Reset on every stop: the backend stream ends when a run stops,
+  // and the <img> otherwise keeps showing the dead stream's last
+  // frame through the next run (found live: a webcam frame stayed
+  // stuck after switching to a video while the backend kept running).
+  streamAttached: false,
   lastSnapshotCount: 0,
   pollFailures: 0,
   audioCtx: null,
   // A confirmation can be brief (one analyzed frame), so the banner
   // latches for a few seconds instead of flashing and vanishing.
   lastAlertAt: 0,
+  // Set once the server is intentionally stopped: nothing more to poll.
+  serverDown: false,
 };
 
 const ALERT_LATCH_MS = 5000;
@@ -176,13 +184,24 @@ function playSiren() {
 
 function setRunningUI(running) {
   state.running = running;
-  els.btnStart.disabled = running || els.weightsSelect.disabled;
+  els.btnStart.disabled = running || els.weightsSelect.disabled || state.serverDown;
   els.btnStop.disabled = !running;
   for (const el of els.runForm.querySelectorAll("input, select")) {
     if (el.id === "opt-sound") continue; // siren toggle stays usable
     el.disabled = running;
   }
   els.recBadge.hidden = !(running && $("opt-save").checked);
+}
+
+function detachStream() {
+  // The backend MJPEG stream ends with the run; drop the <img>
+  // attachment so the next run gets a fresh stream instead of the
+  // previous run's last frame, and show the idle placeholder.
+  state.streamAttached = false;
+  state.lastAlertAt = 0;
+  els.stream.hidden = true;
+  els.stream.removeAttribute("src");
+  els.placeholder.hidden = false;
 }
 
 function applyStatus(s) {
@@ -194,19 +213,21 @@ function applyStatus(s) {
     setRunningUI(true);
     els.stream.hidden = false;
     els.placeholder.hidden = true;
-    if (!state.hasStreamed) {
-      state.hasStreamed = true;
+    if (!state.streamAttached) {
+      state.streamAttached = true;
       els.stream.src = `/api/stream?t=${Date.now()}`;
     }
   } else if (s.state === "error") {
     pill.classList.add("pill-error");
     pill.textContent = "Error";
     setRunningUI(false);
+    detachStream();
     showError(s.error || "The run failed. Check the server log for details.");
   } else if (s.state === "stopped") {
     pill.classList.add("pill-stopped");
     pill.textContent = "Stopped";
     setRunningUI(false);
+    detachStream();
     els.runStatusLine.textContent = s.saved_video
       ? `Run stopped. Video saved to ${s.saved_video}.`
       : "Run stopped.";
@@ -214,6 +235,7 @@ function applyStatus(s) {
     pill.classList.add("pill-idle");
     pill.textContent = "Idle";
     setRunningUI(false);
+    detachStream();
   }
 
   els.elapsed.textContent = fmtElapsed(s.elapsed_s);
@@ -303,6 +325,28 @@ els.btnStop.addEventListener("click", async () => {
   }
 });
 
+// --- server shutdown ----------------------------------------------------
+
+let pollTimer = null;
+
+els.btnShutdown.addEventListener("click", async () => {
+  if (!window.confirm("Stop the demo server? The console will stop responding. Start it again from the terminal when you need it.")) return;
+  els.btnShutdown.disabled = true;
+  try {
+    await api("/api/server/shutdown", { method: "POST" });
+    state.serverDown = true;
+    if (pollTimer !== null) clearInterval(pollTimer);
+    setRunningUI(false);
+    els.btnShutdown.disabled = true;
+    els.backendBanner.textContent = "Server stopped — start it again from the terminal to demo again.";
+    els.backendBanner.hidden = false;
+    els.runStatusLine.textContent = "Server stopped.";
+  } catch (err) {
+    showError(err.message);
+    els.btnShutdown.disabled = false;
+  }
+});
+
 // --- source type toggle -------------------------------------------------
 
 els.runForm.querySelectorAll('input[name="source-type"]').forEach((radio) => {
@@ -377,16 +421,14 @@ document.addEventListener("fullscreenchange", () => {
     await Promise.all([loadSources(), loadWeights(), loadSnapshots()]);
     const s = await api("/api/run/status");
     state.lastSnapshotCount = s.snapshots;
+    // applyStatus attaches the stream when the state is running, so a
+    // page reloaded mid-run reattaches through the same code path.
     applyStatus(s);
-    if (s.state === "running") {
-      // A run was already going (page reloaded mid-run): reattach the stream.
-      els.stream.src = `/api/stream?t=${Date.now()}`;
-    }
   } catch (err) {
     showError(`Could not reach the backend: ${err.message}`);
     els.backendBanner.hidden = false;
   }
-  setInterval(pollStatus, 500);
+  pollTimer = setInterval(pollStatus, 500);
   // Snapshots can also appear without a status change (older runs); refresh rarely.
   setInterval(() => { if (!state.running) loadSnapshots().catch(() => {}); }, 10000);
 })();

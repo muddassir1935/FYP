@@ -68,13 +68,18 @@ def main() -> int:
         videos_dir=Path(args.videos_dir) if args.videos_dir else None,
         weights_dir=Path(args.weights_dir) if args.weights_dir else None,
     )
+    # Own the Server object (instead of uvicorn.run) so the console's
+    # Stop server button can shut the process down via should_exit.
+    config = uvicorn.Config(app, host=args.host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    app.state.uvicorn_server = server
     url = f"http://{args.host}:{port}"
     print("SENTINEL demo console")
     print(f"  Open {url}")
-    print("  Press Ctrl+C to stop.")
+    print("  Stop: Ctrl+C here, or the Stop server button in the console.")
     if not args.no_browser:
         webbrowser.open(url)
-    uvicorn.run(app, host=args.host, port=port, log_level="warning")
+    server.run()
     return 0
 
 

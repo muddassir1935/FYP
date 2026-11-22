@@ -314,6 +314,33 @@ walkthrough is clean (console + network), and the CLI demo still works.
    client with `trust_env=False` — localhost traffic never needs a
    proxy.
 
+### Fixes from the first live test (2026-11-21, branch `fix/demo-ui-live-bugs`)
+
+6. **Stale frame after switching sources.** The stream `<img>` was
+   attached once per page (`hasStreamed`) while the backend MJPEG
+   generator ends with each run, so stopping a webcam run and starting
+   a video left the webcam's last frame on screen even though the
+   backend was running and taking snapshots. Fixed: the attachment is
+   now per-run — `applyStatus` re-attaches on every transition into
+   running and detaches (back to the idle placeholder) on
+   stop/error/idle.
+7. **No way to stop the server.** Closing the tab leaves the uvicorn
+   process running. Fixed: `POST /api/server/shutdown` stops the
+   active run and sets `uvicorn.Server.should_exit` (D11). The
+   launcher now owns the Server object instead of calling
+   `uvicorn.run()`; under a plain `uvicorn ...:main_app` launch the
+   endpoint answers 409 (nothing to signal). The console has a quiet
+   "Stop server" button at the bottom of the control panel with a
+   confirm dialog; after shutdown it stops polling and says how to
+   restart. The smoke script checks the endpoint and the exit (11
+   checks).
+
+**D11 — server shutdown:** closing the browser tab does not stop the
+uvicorn process, so the console has its own off-switch:
+`POST /api/server/shutdown` stops the active run, then sets
+`uvicorn.Server.should_exit`. The launcher owns the Server object for
+this; the factory form (`main_app`) has no server to signal.
+
 **Why the walkthrough uses min-hits 1:** this VM runs inference at
 ~2 FPS, so analyzed frames are ~25 video-frames apart and ByteTrack
 cannot hold one track ID long enough for 3 votes (Test4 confirmed

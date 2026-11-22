@@ -43,6 +43,7 @@ class ApiTestCase(unittest.TestCase):
             snapshots_dir=self.snaps,
             save_video_dir=root / "rec",
         )
+        self.app = app
         self.client = TestClient(app)
         self.runner = app.state.runner
 
@@ -137,6 +138,26 @@ class ApiTestCase(unittest.TestCase):
 
     def test_stream_without_run_is_503(self) -> None:
         self.assertEqual(self.client.get("/api/stream").status_code, 503)
+
+    def test_shutdown_without_server_is_409(self) -> None:
+        # create_app leaves uvicorn_server None (the plain
+        # `uvicorn ...:main_app` launch): nothing to signal.
+        res = self.client.post("/api/server/shutdown")
+        self.assertEqual(res.status_code, 409)
+
+    def test_shutdown_signals_attached_server(self) -> None:
+        class FakeServer:
+            should_exit = False
+
+        server = FakeServer()
+        self.app.state.uvicorn_server = server
+        self.runner._state = "running"
+        res = self.client.post("/api/server/shutdown")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"status": "shutdown_requested"})
+        self.assertTrue(server.should_exit)
+        # The active run is stopped first.
+        self.assertEqual(self.runner.state, "stopped")
 
     def test_snapshots_flow(self) -> None:
         self.assertEqual(self.client.get("/api/snapshots").json(), [])
