@@ -244,5 +244,52 @@ class TestValidation(RunnerTestCase):
         self.assertEqual(self.runner._cached_detector_key[2], None)
 
 
+class TestPauseResume(RunnerTestCase):
+    def test_pause_and_resume_state_machine_and_timer(self) -> None:
+        from unittest.mock import MagicMock
+
+        # Idle cannot pause or resume.
+        with self.assertRaises(RuntimeError):
+            self.runner.pause()
+        with self.assertRaises(RuntimeError):
+            self.runner.resume()
+
+        stream = MagicMock()
+        worker = MagicMock()
+        worker.latest.return_value = ([], [], 0.0)
+        self.runner._state = "running"
+        self.runner._started_at = time.time() - 5.0
+        self.runner._stream = stream
+        self.runner._worker = worker
+
+        paused_info = self.runner.pause()
+        self.assertEqual(paused_info.state, "paused")
+        stream.pause.assert_called_once()
+        worker.pause.assert_called_once()
+
+        # Starting a new run while paused is rejected.
+        (self.weights / "best.pt").write_bytes(b"x")
+        (self.videos / "clip.mp4").write_bytes(b"x")
+        with self.assertRaises(RuntimeError):
+            self.runner.start(_cfg())
+
+        # Elapsed timer stays frozen while paused.
+        t_paused_1 = self.runner.status().elapsed_s
+        time.sleep(0.08)
+        t_paused_2 = self.runner.status().elapsed_s
+        self.assertAlmostEqual(t_paused_1, t_paused_2, places=3)
+
+        resumed_info = self.runner.resume()
+        self.assertEqual(resumed_info.state, "running")
+        stream.resume.assert_called_once()
+        worker.resume.assert_called_once()
+
+        # Stopping while paused works cleanly.
+        self.runner.pause()
+        stopped = self.runner.stop()
+        self.assertEqual(stopped.state, "stopped")
+        self.assertEqual(self.runner.state, "stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

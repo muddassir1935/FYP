@@ -146,6 +146,38 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["state"], "idle")
 
+    def test_pause_resume_endpoints(self) -> None:
+        # Idle -> 409 for both pause and resume.
+        self.assertEqual(self.client.post("/api/run/pause").status_code, 409)
+        self.assertEqual(self.client.post("/api/run/resume").status_code, 409)
+
+        self.runner._state = "running"
+        res = self.client.post("/api/run/pause")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"], "paused")
+
+        # Cannot start a new run while paused.
+        res = self.client.post(
+            "/api/run/start",
+            json={"source_type": "video", "source": "clip.mp4",
+                  "weights_id": "best.pt"},
+        )
+        self.assertEqual(res.status_code, 409)
+
+        # Cannot pause twice.
+        self.assertEqual(self.client.post("/api/run/pause").status_code, 409)
+
+        # Resume -> running.
+        res = self.client.post("/api/run/resume")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"], "running")
+
+        # Stop while paused works.
+        self.client.post("/api/run/pause")
+        res = self.client.post("/api/run/stop")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"], "stopped")
+
     def test_stream_without_run_is_503(self) -> None:
         self.assertEqual(self.client.get("/api/stream").status_code, 503)
 

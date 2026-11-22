@@ -85,6 +85,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 .pill-running { color: var(--ok); border-color: var(--ok); }
 .pill-starting { color: var(--warn); border-color: var(--warn); }
+.pill-paused { color: var(--warn); border-color: var(--warn); }
 .pill-error { color: var(--threat); border-color: var(--threat); }
 .pill-stopped { color: var(--warn); border-color: var(--warn); }
 

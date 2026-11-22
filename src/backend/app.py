@@ -172,6 +172,22 @@ def create_app(
     def run_stop():
         return RunStatus(**vars(runner.stop()))
 
+    @app.post("/api/run/pause", response_model=RunStatus)
+    def run_pause():
+        try:
+            info = runner.pause()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RunStatus(**vars(info))
+
+    @app.post("/api/run/resume", response_model=RunStatus)
+    def run_resume():
+        try:
+            info = runner.resume()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RunStatus(**vars(info))
+
     @app.get("/api/run/status", response_model=RunStatus)
     def run_status():
         return RunStatus(**vars(runner.status()))
@@ -199,14 +215,14 @@ def create_app(
     # -- stream ---------------------------------------------------------
     @app.get("/api/stream", include_in_schema=False)
     def stream():
-        if runner.state != "running":
+        if runner.state not in ("running", "paused"):
             return JSONResponse(
                 {"detail": "No run is active — start one first."}, status_code=503
             )
 
         def generate():
             last_seq = -1
-            while runner.state == "running":
+            while runner.state in ("running", "paused"):
                 seq, jpeg = runner.latest_frame()
                 if jpeg is not None and seq != last_seq:
                     last_seq = seq

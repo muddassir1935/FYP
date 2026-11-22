@@ -97,6 +97,8 @@ class DemoRunner:
         self._error: str | None = None
         self._started_at: float | None = None
         self._stopped_at: float | None = None
+        self._paused_at: float | None = None
+        self._paused_total_s: float = 0.0
         self._saved_video: str | None = None
         self._snapshots_at_start = 0
 
@@ -141,6 +143,8 @@ class DemoRunner:
             self._display_fps = 0.0
             self._started_at = None
             self._stopped_at = None
+            self._paused_at = None
+            self._paused_total_s = 0.0
             self._stop_event.clear()
 
         # Model load + warmup happen outside the lock (while state is
@@ -206,16 +210,51 @@ class DemoRunner:
             raise RuntimeError(f"Could not start the run threads: {exc}") from exc
         return self.status()
 
+    def pause(self) -> RunInfo:
+        """Pause an active run, holding the current frame and timer."""
+        with self._lock:
+            if self._state != "running":
+                raise RuntimeError("No active run to pause.")
+            self._state = "paused"
+            self._paused_at = time.time()
+            stream, worker = self._stream, self._worker
+        if stream is not None:
+            stream.pause()
+        if worker is not None:
+            worker.pause()
+        return self.status()
+
+    def resume(self) -> RunInfo:
+        """Resume a paused run from the exact paused position."""
+        with self._lock:
+            if self._state != "paused":
+                raise RuntimeError("No paused run to resume.")
+            if self._paused_at is not None:
+                self._paused_total_s += max(0.0, time.time() - self._paused_at)
+                self._paused_at = None
+            self._state = "running"
+            stream, worker = self._stream, self._worker
+        if stream is not None:
+            stream.resume()
+        if worker is not None:
+            worker.resume()
+        return self.status()
+
     def stop(self) -> RunInfo:
-        """Stop the active run (idempotent) and return the final stats.
+        """Stop the active or paused run (idempotent) and return final stats.
 
         ``status()`` takes ``self._lock`` itself, so it is never called
         while this method holds the lock (``threading.Lock`` is not
         re-entrant — that deadlocked the first version).
         """
         with self._lock:
-            idle = self._state != "running"
+            idle = self._state not in ("running", "paused")
             if not idle:
+                if self._paused_at is not None:
+                    self._paused_total_s += max(
+                        0.0, time.time() - self._paused_at
+                    )
+                    self._paused_at = None
                 self._state = "stopping"
         if idle:
             return self.status()
@@ -253,14 +292,16 @@ class DemoRunner:
             config = self._config
             started = self._started_at
             stopped = self._stopped_at
+            paused_at = self._paused_at
+            paused_total_s = self._paused_total_s
             error = self._error
             saved_video = self._saved_video
             frames = self._frames_shown
             display_fps = self._display_fps
             worker = self._worker
         return self._build_status(
-            state, config, started, stopped, error, saved_video,
-            frames, display_fps, worker,
+            state, config, started, stopped, paused_at, paused_total_s,
+            error, saved_video, frames, display_fps, worker,
         )
 
     def _build_status(
@@ -269,6 +310,8 @@ class DemoRunner:
         config: RunConfig | None,
         started: float | None,
         stopped: float | None,
+        paused_at: float | None,
+        paused_total_s: float,
         error: str | None,
         saved_video: str | None,
         frames: int,
@@ -289,8 +332,13 @@ class DemoRunner:
             except Exception:
                 pass
         if started is not None:
-            end = stopped if stopped is not None else time.time()
-            elapsed = max(0.0, end - started)
+            if paused_at is not None:
+                end = paused_at
+            elif stopped is not None:
+                end = stopped
+            else:
+                end = time.time()
+            elapsed = max(0.0, end - started - paused_total_s)
         else:
             elapsed = 0.0
         return RunInfo(
@@ -552,6 +600,9 @@ class DemoRunner:
         saved_video_path: str | None = None
         try:
             while not self._stop_event.is_set():
+                if self.state == "paused":
+                    time.sleep(0.02)
+                    continue
                 packet = stream.read()
                 if packet is None or packet[0] == last_index:
                     if stream.ended and not config.loop:
@@ -608,7 +659,7 @@ class DemoRunner:
             # still marked running: finish it cleanly instead of
             # leaving the UI stuck on "Running".
             with self._lock:
-                still_running = self._state == "running"
+                still_running = self._state in ("running", "paused")
             if still_running:
                 if worker.error is not None:
                     self._fail(f"Inference failed: {worker.error}")

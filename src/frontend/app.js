@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   pill: $("state-pill"),
   elapsed: $("elapsed"),
+  btnPause: $("btn-pause"),
   btnStop: $("btn-stop"),
   btnStart: $("btn-start"),
   btnShutdown: $("btn-shutdown"),
@@ -45,6 +46,7 @@ const els = {
 
 const state = {
   running: false,
+  paused: false,
   // True while a POST /api/run/start request is in flight from this tab.
   // Prevents a concurrent 500 ms status poll from overwriting the
   // "Starting" UI with the previous "stopped"/"idle" status.
@@ -186,11 +188,15 @@ function playSiren() {
 
 // --- run control --------------------------------------------------------
 
-function setRunningUI(running, starting = false) {
+function setRunningUI(running, starting = false, paused = false) {
   state.running = running;
-  const busy = running || starting;
+  state.paused = paused;
+  const active = running || paused;
+  const busy = active || starting;
   els.btnStart.disabled = busy || els.weightsSelect.disabled || state.serverDown;
-  els.btnStop.disabled = !running;
+  els.btnStop.disabled = !active || state.serverDown;
+  els.btnPause.disabled = !active || state.serverDown;
+  els.btnPause.textContent = paused ? "Resume" : "Pause";
   for (const el of els.runForm.querySelectorAll("input, select")) {
     if (el.id === "opt-sound") continue; // siren toggle stays usable
     el.disabled = busy;
@@ -243,6 +249,19 @@ function applyStatus(s) {
     if (!state.streamAttached) {
       state.streamAttached = true;
       els.stream.src = `/api/stream?t=${Date.now()}`;
+    }
+  } else if (s.state === "paused") {
+    pill.classList.add("pill-paused");
+    pill.textContent = "Paused";
+    setRunningUI(false, false, true);
+    els.stream.hidden = false;
+    els.placeholder.hidden = true;
+    if (!state.streamAttached) {
+      state.streamAttached = true;
+      els.stream.src = `/api/stream?t=${Date.now()}`;
+    }
+    if (s.source_label) {
+      els.runStatusLine.textContent = `Paused: ${s.source_label} · ${s.weights_label}`;
     }
   } else if (s.state === "error") {
     pill.classList.add("pill-error");
@@ -353,6 +372,21 @@ els.runForm.addEventListener("submit", async (event) => {
     showError(err.message);
     els.runStatusLine.textContent = "";
     setRunningUI(false);
+  }
+});
+
+els.btnPause.addEventListener("click", async () => {
+  els.btnPause.disabled = true;
+  const endpoint = state.paused ? "/api/run/resume" : "/api/run/pause";
+  try {
+    const s = await api(endpoint, { method: "POST" });
+    if (s.state === "running" && s.source_label) {
+      els.runStatusLine.textContent = `Running: ${s.source_label} · ${s.weights_label}`;
+    }
+    applyStatus(s);
+  } catch (err) {
+    showError(err.message);
+    els.btnPause.disabled = !(state.running || state.paused);
   }
 });
 
