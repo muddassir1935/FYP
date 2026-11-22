@@ -143,6 +143,18 @@ def main() -> int:
               f"(state={stopped['state']})")
         if stopped.get("saved_video"):
             check("saved video recorded", True, stopped["saved_video"])
+
+        # -- server shutdown (the console's off-switch) --
+        shut = client.post("/api/server/shutdown")
+        check("server shutdown endpoint", shut.status_code == 200,
+              shut.text[:120] if shut.status_code != 200 else "")
+        exited = False
+        try:
+            server.wait(timeout=10)
+            exited = True
+        except subprocess.TimeoutExpired:
+            pass
+        check("server exits after shutdown", exited)
     finally:
         server.terminate()
         try:
