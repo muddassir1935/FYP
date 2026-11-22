@@ -70,7 +70,10 @@
         <label class="radio"><input type="radio" name="source-type" value="video" checked> Video file</label>
         <label class="radio"><input type="radio" name="source-type" value="webcam"> Webcam</label>
         <label class="field-label" for="video-select">Video</label>
-        <select id="video-select" name="video"></select>
+        <div class="select-row">
+          <select id="video-select" name="video"></select>
+          <button id="btn-delete-video" type="button" class="btn btn-ghost btn-icon" title="Delete selected uploaded video" aria-label="Delete selected uploaded video" hidden>&times;</button>
+        </div>
         <p id="no-videos" class="muted" hidden>No videos in <code>videos/</code> yet — upload one below.</p>
         <label class="field-label" for="webcam-index">Camera index</label>
         <input id="webcam-index" name="webcam-index" type="number" value="0" min="0" max="9" disabled>

@@ -96,6 +96,18 @@ def create_app(
     def sources():
         return [VideoEntry(**v) for v in runner.list_videos()]
 
+    @app.delete("/api/sources/{name:path}")
+    def delete_source(name: str):
+        try:
+            deleted = runner.delete_uploaded_video(name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"deleted": deleted}
+
     @app.get("/api/weights", response_model=list[WeightsEntry])
     def weights():
         return [WeightsEntry(**w) for w in runner.list_weights()]

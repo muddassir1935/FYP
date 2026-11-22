@@ -99,6 +99,43 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(res.json()["name"], "uploads/escape.mp4")
         self.assertFalse((self.videos.parent / "escape.mp4").exists())
 
+    def test_delete_uploaded_video_flow_and_guards(self) -> None:
+        # Upload a clip first.
+        res = self.client.post(
+            "/api/upload",
+            files={"file": ("dup.mp4", b"fake video bytes", "video/mp4")},
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertTrue((self.videos / "uploads" / "dup.mp4").is_file())
+
+        # Non-uploads clip in videos/ is protected (400).
+        self.assertEqual(
+            self.client.delete("/api/sources/clip.mp4").status_code, 400
+        )
+        # Path traversal is rejected (400).
+        self.assertEqual(
+            self.client.delete("/api/sources/uploads/..%2Fclip.mp4").status_code,
+            400,
+        )
+        # Missing file inside uploads/ -> 404.
+        self.assertEqual(
+            self.client.delete("/api/sources/uploads/ghost.mp4").status_code, 404
+        )
+        # Conflict (409) while an active run is running.
+        self.runner._state = "running"
+        self.assertEqual(
+            self.client.delete("/api/sources/uploads/dup.mp4").status_code, 409
+        )
+        self.runner._state = "idle"
+
+        # Valid deletion succeeds and removes file from disk and listing.
+        res = self.client.delete("/api/sources/uploads/dup.mp4")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), {"deleted": "uploads/dup.mp4"})
+        self.assertFalse((self.videos / "uploads" / "dup.mp4").exists())
+        names = [v["name"] for v in self.client.get("/api/sources").json()]
+        self.assertNotIn("uploads/dup.mp4", names)
+
     def test_run_start_validation_errors(self) -> None:
         # Unknown weights -> 400.
         res = self.client.post(

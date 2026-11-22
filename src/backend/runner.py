@@ -382,6 +382,42 @@ class DemoRunner:
             )
         return videos
 
+    def delete_uploaded_video(self, name: str) -> str:
+        """Delete a video inside ``videos/uploads/``.
+
+        Raises ``ValueError`` for invalid paths or non-uploaded files,
+        ``RuntimeError`` if the video is in use by an active/paused run,
+        and ``FileNotFoundError`` if the file does not exist.
+        """
+        if not name or "\\" in name or name.startswith("/"):
+            raise ValueError(f"Invalid video name: {name!r}")
+        parts = Path(name).parts
+        if any(p in ("", ".", "..") for p in parts) or parts[0] != "uploads":
+            raise ValueError(
+                "Only uploaded videos inside uploads/ can be deleted."
+            )
+        uploads_root = (self.videos_dir / "uploads").resolve()
+        target = (self.videos_dir / name).resolve()
+        if uploads_root not in target.parents:
+            raise ValueError(
+                "Only uploaded videos inside uploads/ can be deleted."
+            )
+        with self._lock:
+            if self._state in ("starting", "running", "paused"):
+                in_use = self._config is None or (
+                    self._config.source_type == "video"
+                    and (self.videos_dir / self._config.source).resolve()
+                    == target
+                )
+                if in_use:
+                    raise RuntimeError(
+                        "Cannot delete a video while it is used by an active run."
+                    )
+        if not target.is_file():
+            raise FileNotFoundError(f"Uploaded video not found: {name!r}")
+        target.unlink()
+        return target.relative_to(self.videos_dir.resolve()).as_posix()
+
     def list_weights(self) -> list[dict]:
         """Available weights: .pt files and *_openvino_model folders."""
         if not self.weights_dir.is_dir():

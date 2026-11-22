@@ -21,6 +21,7 @@ const els = {
   btnFullscreen: $("btn-fullscreen"),
   videoPanel: $("video-panel"),
   videoSelect: $("video-select"),
+  btnDeleteVideo: $("btn-delete-video"),
   noVideos: $("no-videos"),
   webcamIndex: $("webcam-index"),
   weightsSelect: $("weights-select"),
@@ -113,7 +114,16 @@ async function loadSources() {
     els.videoSelect.appendChild(opt);
   }
   els.noVideos.hidden = videos.length > 0;
-  els.videoSelect.disabled = videos.length === 0;
+  els.videoSelect.disabled = videos.length === 0 || state.running || state.paused || state.starting;
+  syncDeleteVideoButton();
+}
+
+function syncDeleteVideoButton() {
+  const isVideoMode = els.runForm.querySelector('input[name="source-type"]:checked')?.value === "video";
+  const selected = els.videoSelect.value || "";
+  const canDelete = isVideoMode && selected.startsWith("uploads/");
+  els.btnDeleteVideo.hidden = !canDelete;
+  els.btnDeleteVideo.disabled = !canDelete || state.running || state.paused || state.starting || state.serverDown;
 }
 
 async function loadWeights() {
@@ -201,6 +211,12 @@ function setRunningUI(running, starting = false, paused = false) {
     if (el.id === "opt-sound") continue; // siren toggle stays usable
     el.disabled = busy;
   }
+  if (!busy) {
+    const isVideo = els.runForm.querySelector('input[name="source-type"]:checked')?.value === "video";
+    els.videoSelect.disabled = !isVideo || els.videoSelect.options.length === 0;
+    els.webcamIndex.disabled = isVideo;
+  }
+  syncDeleteVideoButton();
   els.recBadge.hidden = !(running && $("opt-save").checked);
 }
 
@@ -429,7 +445,26 @@ els.runForm.querySelectorAll('input[name="source-type"]').forEach((radio) => {
     const isVideo = els.runForm.querySelector('input[name="source-type"]:checked').value === "video";
     els.videoSelect.disabled = !isVideo || els.videoSelect.options.length === 0;
     els.webcamIndex.disabled = isVideo;
+    syncDeleteVideoButton();
   });
+});
+
+els.videoSelect.addEventListener("change", syncDeleteVideoButton);
+
+els.btnDeleteVideo.addEventListener("click", async () => {
+  const name = els.videoSelect.value;
+  if (!name || !name.startsWith("uploads/")) return;
+  if (!window.confirm(`Delete uploaded video "${name}"?`)) return;
+  els.btnDeleteVideo.disabled = true;
+  try {
+    const encoded = name.split("/").map(encodeURIComponent).join("/");
+    const res = await api(`/api/sources/${encoded}`, { method: "DELETE" });
+    await loadSources();
+    els.uploadStatus.textContent = `Deleted ${res.deleted}.`;
+  } catch (err) {
+    showError(err.message);
+    syncDeleteVideoButton();
+  }
 });
 
 // --- upload -------------------------------------------------------------
@@ -449,6 +484,7 @@ els.uploadInput.addEventListener("change", async () => {
     const saved = await res.json();
     await loadSources();
     els.videoSelect.value = saved.name;
+    syncDeleteVideoButton();
     els.uploadStatus.textContent = `Uploaded ${saved.name}.`;
   } catch (err) {
     els.uploadStatus.textContent = err.message;

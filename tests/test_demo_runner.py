@@ -291,5 +291,38 @@ class TestPauseResume(RunnerTestCase):
         self.assertEqual(self.runner.state, "stopped")
 
 
+class TestDeleteUploadedVideo(RunnerTestCase):
+    def test_delete_uploaded_video_success(self) -> None:
+        uploads = self.videos / "uploads"
+        uploads.mkdir()
+        target = uploads / "dup.mp4"
+        target.write_bytes(b"fake")
+        deleted = self.runner.delete_uploaded_video("uploads/dup.mp4")
+        self.assertEqual(deleted, "uploads/dup.mp4")
+        self.assertFalse(target.exists())
+
+    def test_delete_rejects_non_uploads_and_traversal(self) -> None:
+        (self.videos / "keep.mp4").write_bytes(b"fake")
+        for bad in ("keep.mp4", "../escape.mp4", "uploads/../keep.mp4", "/uploads/x.mp4", ""):
+            with self.assertRaises(ValueError):
+                self.runner.delete_uploaded_video(bad)
+        self.assertTrue((self.videos / "keep.mp4").is_file())
+
+    def test_delete_missing_uploaded_video_raises_not_found(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.runner.delete_uploaded_video("uploads/ghost.mp4")
+
+    def test_delete_conflict_when_run_uses_video(self) -> None:
+        uploads = self.videos / "uploads"
+        uploads.mkdir()
+        target = uploads / "active.mp4"
+        target.write_bytes(b"fake")
+        self.runner._state = "paused"
+        self.runner._config = _cfg(source="uploads/active.mp4")
+        with self.assertRaises(RuntimeError):
+            self.runner.delete_uploaded_video("uploads/active.mp4")
+        self.assertTrue(target.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()
