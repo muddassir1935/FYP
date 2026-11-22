@@ -47,6 +47,7 @@ class InferenceWorker(threading.Thread):
         self._tracker = tracker
         self._snapshots_dir = snapshots_dir
         self._stop_event = threading.Event()
+        self._paused_event = threading.Event()
         self._reset_requested = threading.Event()
         self._lock = threading.Lock()
         self._detections: list[Detection] = []
@@ -57,7 +58,18 @@ class InferenceWorker(threading.Thread):
         self._last_snapshot_at: dict[int, float] = {}
 
     def stop(self) -> None:
+        self._paused_event.clear()
         self._stop_event.set()
+
+    def pause(self) -> None:
+        self._paused_event.set()
+
+    def resume(self) -> None:
+        self._paused_event.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused_event.is_set()
 
     def request_reset(self) -> None:
         self._reset_requested.set()
@@ -69,6 +81,9 @@ class InferenceWorker(threading.Thread):
     def run(self) -> None:
         last_index = 0
         while not self._stop_event.is_set():
+            if self._paused_event.is_set():
+                time.sleep(0.02)
+                continue
             if self._reset_requested.is_set():
                 self._reset_requested.clear()
                 self._detector.reset_tracker()

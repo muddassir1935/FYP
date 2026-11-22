@@ -84,6 +84,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .server-footer p { margin: 0; }
 
 .pill-running { color: var(--ok); border-color: var(--ok); }
+.pill-starting { color: var(--warn); border-color: var(--warn); }
+.pill-paused { color: var(--warn); border-color: var(--warn); }
 .pill-error { color: var(--threat); border-color: var(--threat); }
 .pill-stopped { color: var(--warn); border-color: var(--warn); }
 
@@ -109,8 +111,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .btn-danger { background: transparent; border-color: var(--threat); color: var(--threat); }
 .btn-ghost { background: transparent; }
 .btn-small { padding: 5px 10px; font-size: 13px; }
+.btn-icon {
+  flex: none;
+  padding: 6px 10px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--muted);
+}
+.btn-icon:hover:not(:disabled) { border-color: var(--threat); color: var(--threat); }
 .btn-block { width: 100%; padding: 11px; margin-top: 4px; }
 .file-btn { display: inline-block; margin-top: 8px; }
+.select-row { display: flex; align-items: stretch; gap: 6px; }
+.select-row select { flex: 1; min-width: 0; }
 
 /* --- banners --- */
 .banner {

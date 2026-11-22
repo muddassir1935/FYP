@@ -158,6 +158,171 @@ class TestValidation(RunnerTestCase):
         self.assertEqual(info.frames, 0)
         self.assertIsNone(info.error)
 
+    def test_start_sets_starting_state_before_loading_detector(self) -> None:
+        from unittest.mock import patch
+
+        (self.weights / "best.pt").write_bytes(b"fake")
+        (self.videos / "clip.mp4").write_bytes(b"fake")
+        observed_states: list[str] = []
+
+        def fake_detector(*_args, **_kwargs):
+            observed_states.append(self.runner.state)
+            # Concurrent start while starting must be rejected.
+            with self.assertRaises(RuntimeError):
+                self.runner.start(_cfg())
+            raise RuntimeError("boom during load")
+
+        with patch("src.backend.runner.WeaponDetector", side_effect=fake_detector):
+            with self.assertRaises(RuntimeError):
+                self.runner.start(_cfg())
+
+        self.assertEqual(observed_states, ["starting"])
+        self.assertEqual(self.runner.state, "error")
+
+    def test_detector_warmup_and_cache_reused_across_runs(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        (self.weights / "best.pt").write_bytes(b"fake")
+        (self.videos / "clip.mp4").write_bytes(b"fake")
+
+        created: list[MagicMock] = []
+
+        def fake_detector(*_args, **_kwargs):
+            det = MagicMock()
+            created.append(det)
+            return det
+
+        with patch("src.backend.runner.WeaponDetector", side_effect=fake_detector):
+            det1 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(conf_gun=0.44, conf_knife=0.43)
+            )
+            det2 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(conf_gun=0.55, conf_knife=0.35)
+            )
+            # Changing imgsz must bust the cache and warm up a new instance.
+            det3 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(imgsz=416)
+            )
+
+        self.assertIs(det1, det2)
+        self.assertIsNot(det1, det3)
+        self.assertEqual(len(created), 2)
+        det1.warmup.assert_called_once_with(tracker="bytetrack.yaml")
+        det1.update_thresholds.assert_called_once_with(
+            conf_threshold=0.40,
+            conf_thresholds={"Gun": 0.55, "Knife": 0.35},
+        )
+        det1.reset_tracker.assert_called_once()
+        det3.warmup.assert_called_once_with(tracker="bytetrack.yaml")
+
+    def test_openvino_gpu_failure_falls_back_to_cpu(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ov_dir = self.weights / "v3_openvino_model"
+        ov_dir.mkdir()
+        devices_tried: list[str | None] = []
+
+        def fake_detector(_path, *, device=None, **_kwargs):
+            devices_tried.append(device)
+            det = MagicMock()
+            if device == "intel:gpu":
+                det.warmup.side_effect = RuntimeError("iGPU compile failed")
+            return det
+
+        with (
+            patch.object(
+                DemoRunner, "_detect_openvino_device", return_value="intel:gpu"
+            ),
+            patch("src.backend.runner.WeaponDetector", side_effect=fake_detector),
+        ):
+            det = self.runner._get_or_load_detector(
+                ov_dir, _cfg(weights_id="v3_openvino_model")
+            )
+
+        self.assertEqual(devices_tried, ["intel:gpu", None])
+        self.assertIsNotNone(det)
+        self.assertEqual(self.runner._cached_detector_key[2], None)
+
+
+class TestPauseResume(RunnerTestCase):
+    def test_pause_and_resume_state_machine_and_timer(self) -> None:
+        from unittest.mock import MagicMock
+
+        # Idle cannot pause or resume.
+        with self.assertRaises(RuntimeError):
+            self.runner.pause()
+        with self.assertRaises(RuntimeError):
+            self.runner.resume()
+
+        stream = MagicMock()
+        worker = MagicMock()
+        worker.latest.return_value = ([], [], 0.0)
+        self.runner._state = "running"
+        self.runner._started_at = time.time() - 5.0
+        self.runner._stream = stream
+        self.runner._worker = worker
+
+        paused_info = self.runner.pause()
+        self.assertEqual(paused_info.state, "paused")
+        stream.pause.assert_called_once()
+        worker.pause.assert_called_once()
+
+        # Starting a new run while paused is rejected.
+        (self.weights / "best.pt").write_bytes(b"x")
+        (self.videos / "clip.mp4").write_bytes(b"x")
+        with self.assertRaises(RuntimeError):
+            self.runner.start(_cfg())
+
+        # Elapsed timer stays frozen while paused.
+        t_paused_1 = self.runner.status().elapsed_s
+        time.sleep(0.08)
+        t_paused_2 = self.runner.status().elapsed_s
+        self.assertAlmostEqual(t_paused_1, t_paused_2, places=3)
+
+        resumed_info = self.runner.resume()
+        self.assertEqual(resumed_info.state, "running")
+        stream.resume.assert_called_once()
+        worker.resume.assert_called_once()
+
+        # Stopping while paused works cleanly.
+        self.runner.pause()
+        stopped = self.runner.stop()
+        self.assertEqual(stopped.state, "stopped")
+        self.assertEqual(self.runner.state, "stopped")
+
+
+class TestDeleteUploadedVideo(RunnerTestCase):
+    def test_delete_uploaded_video_success(self) -> None:
+        uploads = self.videos / "uploads"
+        uploads.mkdir()
+        target = uploads / "dup.mp4"
+        target.write_bytes(b"fake")
+        deleted = self.runner.delete_uploaded_video("uploads/dup.mp4")
+        self.assertEqual(deleted, "uploads/dup.mp4")
+        self.assertFalse(target.exists())
+
+    def test_delete_rejects_non_uploads_and_traversal(self) -> None:
+        (self.videos / "keep.mp4").write_bytes(b"fake")
+        for bad in ("keep.mp4", "../escape.mp4", "uploads/../keep.mp4", "/uploads/x.mp4", ""):
+            with self.assertRaises(ValueError):
+                self.runner.delete_uploaded_video(bad)
+        self.assertTrue((self.videos / "keep.mp4").is_file())
+
+    def test_delete_missing_uploaded_video_raises_not_found(self) -> None:
+        with self.assertRaises(FileNotFoundError):
+            self.runner.delete_uploaded_video("uploads/ghost.mp4")
+
+    def test_delete_conflict_when_run_uses_video(self) -> None:
+        uploads = self.videos / "uploads"
+        uploads.mkdir()
+        target = uploads / "active.mp4"
+        target.write_bytes(b"fake")
+        self.runner._state = "paused"
+        self.runner._config = _cfg(source="uploads/active.mp4")
+        with self.assertRaises(RuntimeError):
+            self.runner.delete_uploaded_video("uploads/active.mp4")
+        self.assertTrue(target.is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

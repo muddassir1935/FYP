@@ -142,6 +142,45 @@ class WeaponDetector:
         """The confidence threshold that applies to ``class_id``."""
         return self.conf_thresholds.get(class_id, self.conf_threshold)
 
+    def update_thresholds(
+        self,
+        *,
+        conf_threshold: Optional[float] = None,
+        conf_thresholds: Optional[Dict[Union[int, str], float]] = None,
+    ) -> None:
+        """Update per-class / fallback confidence thresholds in place.
+
+        Allows callers (such as ``DemoRunner``) to reuse a warmed-up
+        detector across runs when only the confidence thresholds change.
+        """
+        if conf_threshold is not None:
+            if not 0.0 < conf_threshold <= 1.0:
+                raise ValueError(
+                    f"conf_threshold must be in (0, 1], got {conf_threshold}"
+                )
+            self.conf_threshold = conf_threshold
+        if conf_thresholds is not None:
+            self.conf_thresholds = self._resolve_thresholds(conf_thresholds)
+        self._predict_conf = min(
+            [self.conf_threshold] + list(self.conf_thresholds.values())
+        )
+
+    def warmup(self, *, tracker: Optional[str] = "bytetrack.yaml") -> None:
+        """Run one dummy inference pass to trigger lazy model compilation.
+
+        OpenVINO and CUDA backends compile kernels on the first inference
+        call; warming up before starting video capture prevents opening
+        frames from racing past while the model is still cold.
+        """
+        import numpy as np
+
+        blank = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+        if tracker:
+            self.track(blank, tracker=tracker)
+            self.reset_tracker()
+        else:
+            self.detect(blank)
+
     def detect(self, frame: object) -> List[Detection]:
         """Detect weapons in one frame (an OpenCV/numpy image)."""
         results = self._model.predict(

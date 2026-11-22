@@ -49,6 +49,7 @@ class FrameSource:
         self._latest: Optional[FramePacket] = None
         self._running = False
         self._ended = False
+        self._paused = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -74,12 +75,25 @@ class FrameSource:
 
     def release(self) -> None:
         self._running = False
+        self._paused.clear()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+
+    def pause(self) -> None:
+        """Freeze frame capture (holds file position; keeps live camera open)."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        """Resume frame capture from the paused position."""
+        self._paused.clear()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
 
     def __enter__(self) -> "FrameSource":
         return self.start()
@@ -123,6 +137,13 @@ class FrameSource:
         index = 0
         failures = 0
         while self._running:
+            if self._paused.is_set():
+                if not self._is_file_source():
+                    # Keep live camera/RTSP buffer drained while frozen so
+                    # resuming immediately delivers fresh frames.
+                    self._cap.grab()
+                time.sleep(0.02)
+                continue
             tick = time.monotonic()
             ok, frame = self._cap.read()
             if not ok or frame is None:

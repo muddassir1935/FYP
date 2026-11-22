@@ -97,6 +97,8 @@ class DemoRunner:
         self._error: str | None = None
         self._started_at: float | None = None
         self._stopped_at: float | None = None
+        self._paused_at: float | None = None
+        self._paused_total_s: float = 0.0
         self._saved_video: str | None = None
         self._snapshots_at_start = 0
 
@@ -110,6 +112,10 @@ class DemoRunner:
         self._display_thread: threading.Thread | None = None
         self._worker: InferenceWorker | None = None
         self._stream: FrameSource | None = None
+        # Warmed-up detector cache keyed by (resolved_weights_path, imgsz, device).
+        # Avoids recompiling OpenVINO/CUDA graphs on every consecutive run.
+        self._cached_detector_key: tuple[Path, int, str | None] | None = None
+        self._cached_detector: WeaponDetector | None = None
 
     # -- public API -----------------------------------------------------
 
@@ -122,10 +128,11 @@ class DemoRunner:
         """Start a run. Raises ValueError on a bad config, RuntimeError
         if a run is already active or the model cannot load."""
         with self._lock:
-            if self._state == "running":
+            if self._state in ("starting", "running", "paused"):
                 raise RuntimeError("A run is already active — stop it first.")
             weights_path = self._resolve_weights(config.weights_id)
             source = self._resolve_source(config)
+            self._state = "starting"
             self._config = config
             self._error = None
             self._saved_video = None
@@ -134,18 +141,17 @@ class DemoRunner:
             self._frame_seq = 0
             self._frames_shown = 0
             self._display_fps = 0.0
+            self._started_at = None
+            self._stopped_at = None
+            self._paused_at = None
+            self._paused_total_s = 0.0
             self._stop_event.clear()
 
-        # Model load happens outside the lock (it takes seconds) but
-        # before the threads start, so a bad weights file fails fast
-        # with a clear error instead of a half-started run.
+        # Model load + warmup happen outside the lock (while state is
+        # "starting") and BEFORE FrameSource opens, so frame 1 of the
+        # video is analyzed at full speed with zero missed opening seconds.
         try:
-            detector = WeaponDetector(
-                weights_path,
-                conf_threshold=0.40,
-                conf_thresholds={"Gun": config.conf_gun, "Knife": config.conf_knife},
-                imgsz=config.imgsz,
-            )
+            detector = self._get_or_load_detector(weights_path, config)
         except FileNotFoundError as exc:
             self._fail(str(exc))
             raise ValueError(str(exc)) from exc
@@ -204,16 +210,51 @@ class DemoRunner:
             raise RuntimeError(f"Could not start the run threads: {exc}") from exc
         return self.status()
 
+    def pause(self) -> RunInfo:
+        """Pause an active run, holding the current frame and timer."""
+        with self._lock:
+            if self._state != "running":
+                raise RuntimeError("No active run to pause.")
+            self._state = "paused"
+            self._paused_at = time.time()
+            stream, worker = self._stream, self._worker
+        if stream is not None:
+            stream.pause()
+        if worker is not None:
+            worker.pause()
+        return self.status()
+
+    def resume(self) -> RunInfo:
+        """Resume a paused run from the exact paused position."""
+        with self._lock:
+            if self._state != "paused":
+                raise RuntimeError("No paused run to resume.")
+            if self._paused_at is not None:
+                self._paused_total_s += max(0.0, time.time() - self._paused_at)
+                self._paused_at = None
+            self._state = "running"
+            stream, worker = self._stream, self._worker
+        if stream is not None:
+            stream.resume()
+        if worker is not None:
+            worker.resume()
+        return self.status()
+
     def stop(self) -> RunInfo:
-        """Stop the active run (idempotent) and return the final stats.
+        """Stop the active or paused run (idempotent) and return final stats.
 
         ``status()`` takes ``self._lock`` itself, so it is never called
         while this method holds the lock (``threading.Lock`` is not
         re-entrant — that deadlocked the first version).
         """
         with self._lock:
-            idle = self._state != "running"
+            idle = self._state not in ("running", "paused")
             if not idle:
+                if self._paused_at is not None:
+                    self._paused_total_s += max(
+                        0.0, time.time() - self._paused_at
+                    )
+                    self._paused_at = None
                 self._state = "stopping"
         if idle:
             return self.status()
@@ -251,14 +292,16 @@ class DemoRunner:
             config = self._config
             started = self._started_at
             stopped = self._stopped_at
+            paused_at = self._paused_at
+            paused_total_s = self._paused_total_s
             error = self._error
             saved_video = self._saved_video
             frames = self._frames_shown
             display_fps = self._display_fps
             worker = self._worker
         return self._build_status(
-            state, config, started, stopped, error, saved_video,
-            frames, display_fps, worker,
+            state, config, started, stopped, paused_at, paused_total_s,
+            error, saved_video, frames, display_fps, worker,
         )
 
     def _build_status(
@@ -267,6 +310,8 @@ class DemoRunner:
         config: RunConfig | None,
         started: float | None,
         stopped: float | None,
+        paused_at: float | None,
+        paused_total_s: float,
         error: str | None,
         saved_video: str | None,
         frames: int,
@@ -287,8 +332,13 @@ class DemoRunner:
             except Exception:
                 pass
         if started is not None:
-            end = stopped if stopped is not None else time.time()
-            elapsed = max(0.0, end - started)
+            if paused_at is not None:
+                end = paused_at
+            elif stopped is not None:
+                end = stopped
+            else:
+                end = time.time()
+            elapsed = max(0.0, end - started - paused_total_s)
         else:
             elapsed = 0.0
         return RunInfo(
@@ -331,6 +381,42 @@ class DemoRunner:
                 }
             )
         return videos
+
+    def delete_uploaded_video(self, name: str) -> str:
+        """Delete a video inside ``videos/uploads/``.
+
+        Raises ``ValueError`` for invalid paths or non-uploaded files,
+        ``RuntimeError`` if the video is in use by an active/paused run,
+        and ``FileNotFoundError`` if the file does not exist.
+        """
+        if not name or "\\" in name or name.startswith("/"):
+            raise ValueError(f"Invalid video name: {name!r}")
+        parts = Path(name).parts
+        if any(p in ("", ".", "..") for p in parts) or parts[0] != "uploads":
+            raise ValueError(
+                "Only uploaded videos inside uploads/ can be deleted."
+            )
+        uploads_root = (self.videos_dir / "uploads").resolve()
+        target = (self.videos_dir / name).resolve()
+        if uploads_root not in target.parents:
+            raise ValueError(
+                "Only uploaded videos inside uploads/ can be deleted."
+            )
+        with self._lock:
+            if self._state in ("starting", "running", "paused"):
+                in_use = self._config is None or (
+                    self._config.source_type == "video"
+                    and (self.videos_dir / self._config.source).resolve()
+                    == target
+                )
+                if in_use:
+                    raise RuntimeError(
+                        "Cannot delete a video while it is used by an active run."
+                    )
+        if not target.is_file():
+            raise FileNotFoundError(f"Uploaded video not found: {name!r}")
+        target.unlink()
+        return target.relative_to(self.videos_dir.resolve()).as_posix()
 
     def list_weights(self) -> list[dict]:
         """Available weights: .pt files and *_openvino_model folders."""
@@ -388,6 +474,87 @@ class DemoRunner:
         return removed
 
     # -- internals -------------------------------------------------------
+
+    @staticmethod
+    def _detect_openvino_device(weights_path: Path) -> str | None:
+        """Select ``intel:gpu`` for OpenVINO folders when an Intel GPU is
+        available, leaving PyTorch (.pt) and CPU-only machines untouched."""
+        if not weights_path.is_dir():
+            return None
+        try:
+            import openvino as ov
+
+            devices = ov.Core().available_devices
+            if any(d.startswith("GPU") for d in devices):
+                return "intel:gpu"
+        except Exception:
+            pass
+        return None
+
+    def _get_or_load_detector(
+        self, weights_path: Path, config: RunConfig
+    ) -> WeaponDetector:
+        """Return a warmed-up ``WeaponDetector``, reusing the cached
+        instance when weights, image size, and device are unchanged."""
+        import os
+
+        device = self._detect_openvino_device(weights_path)
+        key = (weights_path.resolve(), config.imgsz, device)
+        if (
+            self._cached_detector is not None
+            and self._cached_detector_key == key
+        ):
+            self._cached_detector.update_thresholds(
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+            )
+            self._cached_detector.reset_tracker()
+            return self._cached_detector
+
+        if weights_path.is_dir():
+            cache_dir = self.weights_dir / ".ov_cache"
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                os.environ.setdefault("OPENVINO_CACHE_DIR", str(cache_dir))
+            except OSError:
+                pass
+
+        try:
+            detector = WeaponDetector(
+                weights_path,
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+                imgsz=config.imgsz,
+                device=device,
+            )
+            detector.warmup(tracker=config.tracker)
+        except Exception:
+            if device != "intel:gpu":
+                raise
+            # Fallback cleanly to auto/CPU if Intel GPU compilation fails.
+            device = None
+            key = (weights_path.resolve(), config.imgsz, device)
+            detector = WeaponDetector(
+                weights_path,
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+                imgsz=config.imgsz,
+                device=None,
+            )
+            detector.warmup(tracker=config.tracker)
+
+        self._cached_detector = detector
+        self._cached_detector_key = key
+        return detector
 
     def _resolve_weights(self, weights_id: str) -> Path:
         if not weights_id or "/" in weights_id or "\\" in weights_id:
@@ -469,6 +636,9 @@ class DemoRunner:
         saved_video_path: str | None = None
         try:
             while not self._stop_event.is_set():
+                if self.state == "paused":
+                    time.sleep(0.02)
+                    continue
                 packet = stream.read()
                 if packet is None or packet[0] == last_index:
                     if stream.ended and not config.loop:
@@ -525,7 +695,7 @@ class DemoRunner:
             # still marked running: finish it cleanly instead of
             # leaving the UI stuck on "Running".
             with self._lock:
-                still_running = self._state == "running"
+                still_running = self._state in ("running", "paused")
             if still_running:
                 if worker.error is not None:
                     self._fail(f"Inference failed: {worker.error}")

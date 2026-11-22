@@ -171,8 +171,9 @@ control panel (closing the tab does not stop the process), or Ctrl+C
 in the terminal.
 
 The UI is a single vanilla page (no build step, no webfonts): live
-annotated stream with fullscreen, FPS + detection stats, a confirmed-
-threat alert banner with an optional siren, and a snapshot gallery.
+annotated stream with fullscreen, pause/resume controls, FPS + detection
+stats, a confirmed-threat alert banner with an optional siren, uploaded-
+clip management (upload & delete), and a snapshot gallery.
 Plan, API, and design: `docs/demo_ui_plan.md`. The CLI demo still
 works unchanged: `python scripts/inference/run_weapon_demo.py --help`.
 

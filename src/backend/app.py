@@ -96,6 +96,18 @@ def create_app(
     def sources():
         return [VideoEntry(**v) for v in runner.list_videos()]
 
+    @app.delete("/api/sources/{name:path}")
+    def delete_source(name: str):
+        try:
+            deleted = runner.delete_uploaded_video(name)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return {"deleted": deleted}
+
     @app.get("/api/weights", response_model=list[WeightsEntry])
     def weights():
         return [WeightsEntry(**w) for w in runner.list_weights()]
@@ -146,7 +158,7 @@ def create_app(
     # -- run control ---------------------------------------------------
     @app.post("/api/run/start", response_model=RunStatus)
     def run_start(body: RunStartRequest):
-        if runner.state == "running":
+        if runner.state in ("starting", "running", "paused"):
             raise HTTPException(409, "A run is already active — stop it first.")
         config = RunConfig(
             source_type=body.source_type,
@@ -171,6 +183,22 @@ def create_app(
     @app.post("/api/run/stop", response_model=RunStatus)
     def run_stop():
         return RunStatus(**vars(runner.stop()))
+
+    @app.post("/api/run/pause", response_model=RunStatus)
+    def run_pause():
+        try:
+            info = runner.pause()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RunStatus(**vars(info))
+
+    @app.post("/api/run/resume", response_model=RunStatus)
+    def run_resume():
+        try:
+            info = runner.resume()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return RunStatus(**vars(info))
 
     @app.get("/api/run/status", response_model=RunStatus)
     def run_status():
@@ -199,14 +227,14 @@ def create_app(
     # -- stream ---------------------------------------------------------
     @app.get("/api/stream", include_in_schema=False)
     def stream():
-        if runner.state != "running":
+        if runner.state not in ("running", "paused"):
             return JSONResponse(
                 {"detail": "No run is active — start one first."}, status_code=503
             )
 
         def generate():
             last_seq = -1
-            while runner.state == "running":
+            while runner.state in ("running", "paused"):
                 seq, jpeg = runner.latest_frame()
                 if jpeg is not None and seq != last_seq:
                     last_seq = seq
