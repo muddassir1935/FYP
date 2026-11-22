@@ -110,6 +110,10 @@ class DemoRunner:
         self._display_thread: threading.Thread | None = None
         self._worker: InferenceWorker | None = None
         self._stream: FrameSource | None = None
+        # Warmed-up detector cache keyed by (resolved_weights_path, imgsz, device).
+        # Avoids recompiling OpenVINO/CUDA graphs on every consecutive run.
+        self._cached_detector_key: tuple[Path, int, str | None] | None = None
+        self._cached_detector: WeaponDetector | None = None
 
     # -- public API -----------------------------------------------------
 
@@ -139,16 +143,11 @@ class DemoRunner:
             self._stopped_at = None
             self._stop_event.clear()
 
-        # Model load happens outside the lock (it takes seconds) but
-        # before the threads start, so a bad weights file fails fast
-        # with a clear error instead of a half-started run.
+        # Model load + warmup happen outside the lock (while state is
+        # "starting") and BEFORE FrameSource opens, so frame 1 of the
+        # video is analyzed at full speed with zero missed opening seconds.
         try:
-            detector = WeaponDetector(
-                weights_path,
-                conf_threshold=0.40,
-                conf_thresholds={"Gun": config.conf_gun, "Knife": config.conf_knife},
-                imgsz=config.imgsz,
-            )
+            detector = self._get_or_load_detector(weights_path, config)
         except FileNotFoundError as exc:
             self._fail(str(exc))
             raise ValueError(str(exc)) from exc
@@ -391,6 +390,87 @@ class DemoRunner:
         return removed
 
     # -- internals -------------------------------------------------------
+
+    @staticmethod
+    def _detect_openvino_device(weights_path: Path) -> str | None:
+        """Select ``intel:gpu`` for OpenVINO folders when an Intel GPU is
+        available, leaving PyTorch (.pt) and CPU-only machines untouched."""
+        if not weights_path.is_dir():
+            return None
+        try:
+            import openvino as ov
+
+            devices = ov.Core().available_devices
+            if any(d.startswith("GPU") for d in devices):
+                return "intel:gpu"
+        except Exception:
+            pass
+        return None
+
+    def _get_or_load_detector(
+        self, weights_path: Path, config: RunConfig
+    ) -> WeaponDetector:
+        """Return a warmed-up ``WeaponDetector``, reusing the cached
+        instance when weights, image size, and device are unchanged."""
+        import os
+
+        device = self._detect_openvino_device(weights_path)
+        key = (weights_path.resolve(), config.imgsz, device)
+        if (
+            self._cached_detector is not None
+            and self._cached_detector_key == key
+        ):
+            self._cached_detector.update_thresholds(
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+            )
+            self._cached_detector.reset_tracker()
+            return self._cached_detector
+
+        if weights_path.is_dir():
+            cache_dir = self.weights_dir / ".ov_cache"
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                os.environ.setdefault("OPENVINO_CACHE_DIR", str(cache_dir))
+            except OSError:
+                pass
+
+        try:
+            detector = WeaponDetector(
+                weights_path,
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+                imgsz=config.imgsz,
+                device=device,
+            )
+            detector.warmup(tracker=config.tracker)
+        except Exception:
+            if device != "intel:gpu":
+                raise
+            # Fallback cleanly to auto/CPU if Intel GPU compilation fails.
+            device = None
+            key = (weights_path.resolve(), config.imgsz, device)
+            detector = WeaponDetector(
+                weights_path,
+                conf_threshold=0.40,
+                conf_thresholds={
+                    "Gun": config.conf_gun,
+                    "Knife": config.conf_knife,
+                },
+                imgsz=config.imgsz,
+                device=None,
+            )
+            detector.warmup(tracker=config.tracker)
+
+        self._cached_detector = detector
+        self._cached_detector_key = key
+        return detector
 
     def _resolve_weights(self, weights_id: str) -> Path:
         if not weights_id or "/" in weights_id or "\\" in weights_id:

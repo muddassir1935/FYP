@@ -179,6 +179,70 @@ class TestValidation(RunnerTestCase):
         self.assertEqual(observed_states, ["starting"])
         self.assertEqual(self.runner.state, "error")
 
+    def test_detector_warmup_and_cache_reused_across_runs(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        (self.weights / "best.pt").write_bytes(b"fake")
+        (self.videos / "clip.mp4").write_bytes(b"fake")
+
+        created: list[MagicMock] = []
+
+        def fake_detector(*_args, **_kwargs):
+            det = MagicMock()
+            created.append(det)
+            return det
+
+        with patch("src.backend.runner.WeaponDetector", side_effect=fake_detector):
+            det1 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(conf_gun=0.44, conf_knife=0.43)
+            )
+            det2 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(conf_gun=0.55, conf_knife=0.35)
+            )
+            # Changing imgsz must bust the cache and warm up a new instance.
+            det3 = self.runner._get_or_load_detector(
+                self.weights / "best.pt", _cfg(imgsz=416)
+            )
+
+        self.assertIs(det1, det2)
+        self.assertIsNot(det1, det3)
+        self.assertEqual(len(created), 2)
+        det1.warmup.assert_called_once_with(tracker="bytetrack.yaml")
+        det1.update_thresholds.assert_called_once_with(
+            conf_threshold=0.40,
+            conf_thresholds={"Gun": 0.55, "Knife": 0.35},
+        )
+        det1.reset_tracker.assert_called_once()
+        det3.warmup.assert_called_once_with(tracker="bytetrack.yaml")
+
+    def test_openvino_gpu_failure_falls_back_to_cpu(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        ov_dir = self.weights / "v3_openvino_model"
+        ov_dir.mkdir()
+        devices_tried: list[str | None] = []
+
+        def fake_detector(_path, *, device=None, **_kwargs):
+            devices_tried.append(device)
+            det = MagicMock()
+            if device == "intel:gpu":
+                det.warmup.side_effect = RuntimeError("iGPU compile failed")
+            return det
+
+        with (
+            patch.object(
+                DemoRunner, "_detect_openvino_device", return_value="intel:gpu"
+            ),
+            patch("src.backend.runner.WeaponDetector", side_effect=fake_detector),
+        ):
+            det = self.runner._get_or_load_detector(
+                ov_dir, _cfg(weights_id="v3_openvino_model")
+            )
+
+        self.assertEqual(devices_tried, ["intel:gpu", None])
+        self.assertIsNotNone(det)
+        self.assertEqual(self.runner._cached_detector_key[2], None)
+
 
 if __name__ == "__main__":
     unittest.main()
