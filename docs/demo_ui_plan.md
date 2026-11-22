@@ -109,12 +109,15 @@ never blocks the event loop on inference (PROJECT_CONTEXT §7.2).
 | `GET /static/*` | CSS/JS | Mounted static dir |
 | `GET /api/health` | Liveness | `{status: "ok", weights_dir_exists, videos_dir_exists}` |
 | `GET /api/sources` | List video files in `videos/` + webcam option | `{videos: [{name, size_mb, duration_s?}], webcams: [0]}` — duration only if cheap to read (cv2 probe, cached). |
+| `DELETE /api/sources/{name}` | Delete an uploaded video | Only files inside `videos/uploads/` (400 otherwise / traversal); 404 if missing; 409 if used by an active/paused run. |
 | `GET /api/weights` | List available weights | `{weights: [{id, kind: "pytorch"\|"openvino", label, path}]}` — `.pt` files + `*_openvino_model` dirs. |
 | `POST /api/upload` | Upload a video clip | Multipart; saved to `videos/uploads/`; size cap 500 MB; only video extensions. |
-| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, loop, hide_unconfirmed, save_video}`. 409 if a run is already active (client must stop first — explicit, no surprise kills). |
-| `POST /api/run/stop` | Stop the run | Idempotent; returns the final stats. |
-| `GET /api/run/status` | Run state + live stats | `{state: idle\|running\|stopped\|error, source, weights, display_fps, detect_fps, frames, detections, confirmed, started_at, elapsed_s, error}`. |
-| `GET /api/stream` | MJPEG annotated stream | `multipart/x-mixed-replace`; 503 with a JSON body when no run is active (the `<img>` shows the idle placeholder instead). |
+| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, loop, hide_unconfirmed, save_video}`. Enters `starting` while loading/warming up the detector. 409 if a run is already starting/running/paused. |
+| `POST /api/run/pause` | Pause the active run | Holds video file position (or freezes webcam display), pauses inference and elapsed timer, keeps `/api/stream` alive. 409 if not running. |
+| `POST /api/run/resume` | Resume a paused run | Resumes from the paused position and timer. 409 if not paused. |
+| `POST /api/run/stop` | Stop the run | Idempotent (works from running or paused); returns the final stats. |
+| `GET /api/run/status` | Run state + live stats | `{state: idle\|starting\|running\|paused\|stopped\|error, source, weights, display_fps, detect_fps, frames, detections, confirmed, started_at, elapsed_s, error}`. |
+| `GET /api/stream` | MJPEG annotated stream | `multipart/x-mixed-replace`; active during `running` and `paused` (holds last frame when paused); 503 with a JSON body otherwise. |
 | `GET /api/snapshots` | List snapshots (newest first) | `{snapshots: [{file, class, track, timestamp, url}]}` — parsed from filenames. |
 | `GET /snapshots/{file}` | Serve one snapshot image | Path-traversal guarded (name must be inside the snapshots dir). |
 | `POST /api/snapshots/clear` | Delete all snapshots | For a clean demo start. Asks for confirmation in the UI. |
@@ -340,6 +343,30 @@ uvicorn process, so the console has its own off-switch:
 `POST /api/server/shutdown` stops the active run, then sets
 `uvicorn.Server.should_exit`. The launcher owns the Server object for
 this; the factory form (`main_app`) has no server to signal.
+
+### Run controls, warmup, and upload cleanup (2026-11-23, branch `feature/demo-ui-run-controls`)
+
+- **D12 — explicit `starting` state + detector warmup & cache:**
+  `DemoRunner.start()` sets `state = "starting"` before loading and
+  warming up `WeaponDetector` (`warmup()` runs one dummy frame + resets
+  ByteTrack) and before opening `FrameSource`, so the UI never flickers
+  back to "Run stopped." during polling and frame 1 of the video runs at
+  full detect FPS. Warmed detectors are cached in `DemoRunner` by
+  `(weights_path, imgsz, device)` so consecutive runs start immediately;
+  for OpenVINO directories, `intel:gpu` is auto-selected when available
+  (with automatic CPU fallback) and `OPENVINO_CACHE_DIR` points to
+  `models/weights/.ov_cache`.
+- **D13 — explicit Pause / Resume endpoints:** `POST /api/run/pause` and
+  `POST /api/run/resume` (rather than a single toggle, so retries are
+  explicit and safe). Pausing holds file capture position in
+  `FrameSource`, pauses `InferenceWorker` and the `elapsed_s` timer, and
+  keeps `/api/stream` alive showing the frozen annotated frame; stopping
+  while paused works cleanly.
+- **D14 — delete uploaded videos:** `DELETE /api/sources/{name:path}`
+  deletes only files inside `videos/uploads/` (rejecting traversal and
+  non-upload files with 400, missing files with 404, and active-run
+  conflicts with 409). The UI shows a `×` button beside the Video
+  selector whenever an `uploads/...` clip is selected.
 
 **Why the walkthrough uses min-hits 1:** this VM runs inference at
 ~2 FPS, so analyzed frames are ~25 video-frames apart and ByteTrack
