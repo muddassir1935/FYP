@@ -1,7 +1,8 @@
 # Demo Web UI — Plan & Design (FYP-I)
 
-**Status:** Plan approved by user (2026-11-21). Build in progress on
-`feature/demo-web-ui`.
+**Status:** Shipped — merged as PR #35 (23 Nov 2026). This document is
+now the design record of the shipped UI; the build plan in §7 and the
+verification narrative in §8 read as history.
 **Scope change (user decision, 2026-11-21):** FYP-I originally had no web
 UI (pipeline + standalone OpenCV demo only). The user asked for a complete
 demo UI now, because the jury demo cannot be run from terminal commands —
@@ -108,18 +109,19 @@ never blocks the event loop on inference (PROJECT_CONTEXT §7.2).
 | `GET /` | Serve the UI | `src/frontend/index.html` |
 | `GET /static/*` | CSS/JS | Mounted static dir |
 | `GET /api/health` | Liveness | `{status: "ok", weights_dir_exists, videos_dir_exists}` |
-| `GET /api/sources` | List video files in `videos/` + webcam option | `{videos: [{name, size_mb, duration_s?}], webcams: [0]}` — duration only if cheap to read (cv2 probe, cached). |
-| `DELETE /api/sources/{name}` | Delete an uploaded video | Only files inside `videos/uploads/` (400 otherwise / traversal); 404 if missing; 409 if used by an active/paused run. |
-| `GET /api/weights` | List available weights | `{weights: [{id, kind: "pytorch"\|"openvino", label, path}]}` — `.pt` files + `*_openvino_model` dirs. |
-| `POST /api/upload` | Upload a video clip | Multipart; saved to `videos/uploads/`; size cap 500 MB; only video extensions. |
-| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, loop, hide_unconfirmed, save_video}`. Enters `starting` while loading/warming up the detector. 409 if a run is already starting/running/paused. |
+| `GET /api/sources` | List video files in `videos/` + webcam option | `[{name, size_mb, duration_s?}]` — a bare JSON list, sorted by name; no `webcams` field (the webcam option is a frontend radio button, not an API value). Duration is probed with OpenCV per file (not cached); a file that cannot be probed still lists, with `duration_s: null`. |
+| `DELETE /api/sources/{name}` | Delete an uploaded video | Only files inside `videos/uploads/` (400 otherwise / traversal); 404 if missing; 409 if used by an active/paused run. A failed unlink maps to 409 when the file is in use (e.g. open on Windows) and 500 otherwise. |
+| `GET /api/weights` | List available weights | `[{id, kind: "pytorch"\|"openvino", label}]` — a bare JSON list; there is no `path` field (weights are addressed by `id` only, and the server never reveals filesystem paths). `.pt` files + `*_openvino_model` dirs. |
+| `GET /api/defaults` | Shipped operating point | `{conf_gun: 0.44, conf_knife: 0.43, conf_fallback: 0.40}` from `src/pipeline/thresholds.py`; the frontend fills its threshold inputs from here instead of hardcoding them. |
+| `POST /api/upload` | Upload a video clip | Multipart; saved to `videos/uploads/`; size cap 500 MB; only video extensions. Probed with OpenCV at upload time and rejected with 400 (file deleted) when not a playable video — extension alone is no longer enough. |
+| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, loop, hide_unconfirmed, save_video, tracker, record_raw}`. `tracker` defaults to `bytetrack.yaml`; `record_raw` defaults to `true` (records the raw un-annotated frames; `false` records the annotated video as before). Enters `starting` while loading/warming up the detector. 409 if a run is already starting/running/paused. |
 | `POST /api/run/pause` | Pause the active run | Holds video file position (or freezes webcam display), pauses inference and elapsed timer, keeps `/api/stream` alive. 409 if not running. |
 | `POST /api/run/resume` | Resume a paused run | Resumes from the paused position and timer. 409 if not paused. |
-| `POST /api/run/stop` | Stop the run | Idempotent (works from running or paused); returns the final stats. |
-| `GET /api/run/status` | Run state + live stats | `{state: idle\|starting\|running\|paused\|stopped\|error, source, weights, display_fps, detect_fps, frames, detections, confirmed, started_at, elapsed_s, error}`. |
+| `POST /api/run/stop` | Stop the run | Idempotent (works from running or paused); returns the final stats. Also works while `starting`: cancels the start (the loader checks the flag after each slow step). |
+| `GET /api/run/status` | Run state + live stats | `{state: idle\|starting\|running\|paused\|stopping\|stopped\|error, source, weights, display_fps, detect_fps, frames, detections, confirmed, elapsed_s, error, warning}`. `starting` and `stopping` are transient (entering/exiting a run); `paused` holds the run. `warning` carries non-fatal problems (Intel GPU compile fallback, failed video recording); `saved_video` ends `_raw.mp4` when the recording is raw. |
 | `GET /api/stream` | MJPEG annotated stream | `multipart/x-mixed-replace`; active during `running` and `paused` (holds last frame when paused); 503 with a JSON body otherwise. |
 | `GET /api/snapshots` | List snapshots (newest first) | `{snapshots: [{file, class, track, timestamp, url}]}` — parsed from filenames. |
-| `GET /snapshots/{file}` | Serve one snapshot image | Path-traversal guarded (name must be inside the snapshots dir). |
+| `GET /snapshots/{file}` | Serve one snapshot image | Path-traversal guarded (name must be inside the snapshots dir). Serves only files matching `threat_<Gun|Knife>_<stamp>_t<track>.jpg` (same regex as the listing); any other `.jpg` in the dir is a 404. |
 | `POST /api/snapshots/clear` | Delete all snapshots | For a clean demo start. Asks for confirmation in the UI. |
 
 Validation: unknown weights id → 400; missing video file → 400; bad
@@ -284,6 +286,10 @@ walkthrough is clean (console + network), and the CLI demo still works.
 
 - **Unit + API tests:** 62/62 green in ~1 s (35 pre-existing + 15
   runner + 12 API).
+- **Addendum (23 Nov 2026, PR #35 merge):** **75/75 green** (17 API +
+  23 runner + 10 thresholds + 5 FPS + 9 buffer + 11 track-voting) —
+  the PR #35 baseline. Post-fix-session count (23 Nov 2026):
+  **131/131 green** (75 baseline + 14 training + 42 pipeline).
 - **Headless worker smoke:** real v3 weights + Test7.mp4 — 145 frames,
   display FPS ~19, detect FPS ramping to ~5 (CPU-bound VM), clean
   auto-stop at end of video, JPEG frames produced.
@@ -353,7 +359,7 @@ this; the factory form (`main_app`) has no server to signal.
   back to "Run stopped." during polling and frame 1 of the video runs at
   full detect FPS. Warmed detectors are cached in `DemoRunner` by
   `(weights_path, imgsz, device)` so consecutive runs start immediately;
-  for OpenVINO directories, `intel:gpu` is auto-selected when available
+  for OpenVINO directories, `xpu` is auto-selected when available
   (with automatic CPU fallback) and `OPENVINO_CACHE_DIR` points to
   `models/weights/.ov_cache`.
 - **D13 — explicit Pause / Resume endpoints:** `POST /api/run/pause` and
@@ -399,18 +405,24 @@ verifies the alert/snapshot UI path, not tracking at 2 FPS.
 ## 10. Monitor & demo-day operations
 
 - **Logging:** the runner logs run start/stop, source, weights,
-  errors, and per-run summary (frames, confirmed) to stdout; the
-  smoke script checks the log for errors.
+  errors, and per-run summary (frames, confirmed, snapshots, elapsed)
+  to stdout via the `logging` module; the smoke script captures the
+  server log to a temp file and prints its tail on failure.
 - **Health:** `GET /api/health` + the UI shows a "backend unreachable"
   banner if polling fails twice in a row.
 - **Pre-demo smoke script** (`scripts/smoke_demo_ui.py`): starts the
   server on a test port, hits every endpoint, runs a 5-second clip
   end to end, asserts a stream frame + stats + (if a threat confirms)
-  a snapshot, prints PASS/FAIL per check. Run it the morning of the
-  review.
+  a snapshot, prints PASS/FAIL per check. Also covers pause → resume →
+  stop mid-run, upload + delete a clip, and start with missing weights
+  (expect 400); the smoke run records video so the saved-video check
+  actually runs. Run it the morning of the review.
 - **Failure modes the UI must survive:** weights file missing (clear
   error, no crash), video file deleted mid-list (400 on start),
-  webcam busy (error + "close other apps using the camera"), port
+  webcam busy or unplugged (start: 400 "Could not open source …";
+  mid-run disconnect: run fails with "Camera disconnected (read_failures)"),
+  corrupt clip (run fails with "Could not read video (read_failures)"),
+  clean end of file (clean stop), port
   8000 taken (entry script tries 8001 and prints the URL), browser
   closed mid-run (run keeps going server-side; reopening shows the
   live state), server killed mid-run (next start is clean — no stale

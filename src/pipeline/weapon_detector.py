@@ -33,17 +33,42 @@ BBox = Tuple[float, float, float, float]  # (x1, y1, x2, y2), pixels
 
 @dataclass(frozen=True)
 class Detection:
-    """One detected object in one frame."""
+    """One detected object in one frame.
+
+    ``track_id`` is set by the track voter (``track_voting``) on the
+    voted copy of a detection; raw model output leaves it ``None``.
+    ``draw_annotations`` matches confirmed threats by it, not by
+    object identity, so rebuilt detections still draw as confirmed.
+    """
 
     class_id: int
     class_name: str
     confidence: float
     bbox: BBox
+    track_id: int | None = None
 
-    @property
-    def center(self) -> Tuple[float, float]:
-        x1, y1, x2, y2 = self.bbox
-        return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+def detect_openvino_device(weights_path: Union[str, Path]) -> Optional[str]:
+    """Select ``"xpu"`` for OpenVINO folders when an Intel GPU is
+    available, leaving PyTorch (.pt) and CPU-only machines untouched.
+
+    Shared by the web UI runner and the CLI demo so both pick the same
+    device for the same weights. ``"xpu"`` is the PyTorch-style name
+    ultralytics accepts since 8.4.210; the older ``"intel:gpu"`` alias
+    is deprecated in the pinned 8.4.215 and emits a warning per run.
+    """
+    weights_path = Path(weights_path)
+    if not weights_path.is_dir():
+        return None
+    try:
+        import openvino as ov
+
+        devices = ov.Core().available_devices
+        if any(d.startswith("GPU") for d in devices):
+            return "xpu"
+    except Exception:
+        pass
+    return None
 
 
 class WeaponDetector:
@@ -53,8 +78,8 @@ class WeaponDetector:
     ``weapon_yolov8s_baseline_20261108_1837_best.pt`` — see
     ``docs/training_run_log.md``) or to an exported OpenVINO model folder
     (``scripts/training/export_openvino.py``). ``device``: ``"cuda"`` /
-    ``"cpu"`` / ``"intel:gpu"`` (OpenVINO models) or None for ultralytics'
-    automatic choice.
+    ``"cpu"`` / ``"xpu"`` (OpenVINO models on an Intel GPU) or None for
+    ultralytics' automatic choice.
 
     ``conf_threshold`` is the fallback threshold for any class without a
     per-class override. ``conf_thresholds`` maps a class id (``int``) or

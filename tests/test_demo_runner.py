@@ -1,8 +1,10 @@
 """Unit tests for the demo web UI runner (no model, no camera).
 
-Covers listings, config validation, and snapshot handling. Starting a
-real run needs weights + a video and is covered by the headless worker
-smoke test and the Playwright walkthrough instead.
+Covers listings, config validation, and snapshot handling. Real runs
+(start → frames → stop, pause → stop, worker-error propagation) are
+covered by tests/test_demo_integration.py with a mocked detector; the
+Playwright walkthrough still lives outside the repo at
+~/workspace/sentinel-dataset-v2/walkthrough_demo_ui.py.
 
 Run from the repo root:  python -m unittest discover -s tests -v
 """
@@ -17,8 +19,15 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.backend.runner import DemoRunner, RunConfig
+
+try:
+    from helpers import CV2_AVAILABLE, make_tiny_video
+except ImportError:  # pragma: no cover - helpers missing
+    CV2_AVAILABLE = False
+    make_tiny_video = None  # type: ignore[assignment]
 
 
 def _cfg(**overrides) -> RunConfig:
@@ -133,6 +142,25 @@ class TestValidation(RunnerTestCase):
                 _cfg(source_type="webcam", source="not-a-number")
             )
 
+    def test_negative_webcam_index_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            self.runner._resolve_source(
+                _cfg(source_type="webcam", source="-1")
+            )
+
+    def test_weights_dot_and_dotdot_rejected(self) -> None:
+        for bad in (".", ".."):
+            with self.assertRaises(ValueError):
+                self.runner._resolve_weights(bad)
+
+    def test_weights_symlink_escape_rejected(self) -> None:
+        outside = Path(self._tmp.name) / "outside.pt"
+        outside.write_bytes(b"x")
+        link = self.weights / "link.pt"
+        link.symlink_to(outside)
+        with self.assertRaises(ValueError):
+            self.runner._resolve_weights("link.pt")
+
     def test_bad_source_type_rejected(self) -> None:
         with self.assertRaises(ValueError):
             self.runner._resolve_source(_cfg(source_type="rtsp"))
@@ -225,13 +253,13 @@ class TestValidation(RunnerTestCase):
         def fake_detector(_path, *, device=None, **_kwargs):
             devices_tried.append(device)
             det = MagicMock()
-            if device == "intel:gpu":
+            if device == "xpu":
                 det.warmup.side_effect = RuntimeError("iGPU compile failed")
             return det
 
         with (
             patch.object(
-                DemoRunner, "_detect_openvino_device", return_value="intel:gpu"
+                DemoRunner, "_detect_openvino_device", return_value="xpu"
             ),
             patch("src.backend.runner.WeaponDetector", side_effect=fake_detector),
         ):
@@ -239,9 +267,14 @@ class TestValidation(RunnerTestCase):
                 ov_dir, _cfg(weights_id="v3_openvino_model")
             )
 
-        self.assertEqual(devices_tried, ["intel:gpu", None])
+        self.assertEqual(devices_tried, ["xpu", None])
         self.assertIsNotNone(det)
         self.assertEqual(self.runner._cached_detector_key[2], None)
+        # The fallback must be recorded, not silent.
+        warning = self.runner.status().warning
+        self.assertIsNotNone(warning)
+        self.assertIn("Intel GPU compile failed", warning)
+        self.assertIn("running on CPU", warning)
 
 
 class TestPauseResume(RunnerTestCase):
@@ -322,6 +355,82 @@ class TestDeleteUploadedVideo(RunnerTestCase):
         with self.assertRaises(RuntimeError):
             self.runner.delete_uploaded_video("uploads/active.mp4")
         self.assertTrue(target.is_file())
+
+
+class TestStopRacingStart(RunnerTestCase):
+    """Stop landing in the window between state="running" and the
+    thread starts used to join a never-started thread (RuntimeError)
+    and wedge the run in "stopping" forever."""
+
+    def test_teardown_with_never_started_threads_does_not_raise(self) -> None:
+        import threading
+        from unittest.mock import MagicMock
+
+        from src.pipeline import InferenceWorker, TrackClassVoter
+
+        worker = InferenceWorker(
+            MagicMock(),
+            MagicMock(),
+            TrackClassVoter(),
+            cv2_module=MagicMock(),
+            tracker="bytetrack.yaml",
+            snapshots_dir=self.snaps,
+        )
+        self.runner._worker = worker
+        self.runner._display_thread = threading.Thread(target=lambda: None)
+        self.runner._state = "running"
+        info = self.runner.stop()  # must not raise RuntimeError
+        self.assertEqual(info.state, "stopped")
+        self.assertEqual(self.runner.state, "stopped")
+
+    @unittest.skipUnless(CV2_AVAILABLE, "cv2 not installed")
+    def test_stop_called_during_start_does_not_wedge(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from src.pipeline import InferenceWorker as RealWorker
+
+        assert make_tiny_video is not None
+        (self.weights / "best.pt").write_bytes(b"fake")
+        make_tiny_video(self.videos / "clip.mp4")
+
+        stop_results: list = []
+
+        def worker_factory(*args, **kwargs):
+            worker = RealWorker(*args, **kwargs)
+            orig_start = worker.start
+
+            def start_once():
+                # Stop lands exactly in the race window: state is
+                # "running", the worker thread is not started yet.
+                stop_results.append(self.runner.stop())
+                return orig_start()
+
+            worker.start = start_once  # type: ignore[method-assign]
+            return worker
+
+        with (
+            patch(
+                "src.backend.runner.WeaponDetector",
+                side_effect=lambda *a, **k: MagicMock(),
+            ),
+            patch("src.backend.runner.InferenceWorker", side_effect=worker_factory),
+        ):
+            info = self.runner.start(_cfg())
+
+        self.assertEqual(len(stop_results), 1)
+        self.assertEqual(stop_results[0].state, "stopped")
+        # start() returned without raising and the run is not wedged
+        # in "stopping".
+        self.assertEqual(info.state, "stopped")
+        self.assertEqual(self.runner.state, "stopped")
+        worker_thread = self.runner._worker
+        display_thread = self.runner._display_thread
+        if worker_thread is not None:
+            worker_thread.join(timeout=5)
+            self.assertFalse(worker_thread.is_alive())
+        if display_thread is not None:
+            display_thread.join(timeout=5)
+            self.assertFalse(display_thread.is_alive())
 
 
 if __name__ == "__main__":

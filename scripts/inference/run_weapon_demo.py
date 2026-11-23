@@ -65,6 +65,7 @@ if str(REPO_ROOT) not in sys.path:
 WINDOW_NAME = "SENTINEL - Weapon Detection Demo"
 
 from src.pipeline import (
+    FALLBACK_FPS,
     Detection,
     FrameSource,
     InferenceWorker,
@@ -72,16 +73,13 @@ from src.pipeline import (
     TrackClassVoter,
     TrackedDetection,
     WeaponDetector,
+    detect_openvino_device,
     draw_annotations,
 )
+from src.pipeline.thresholds import CONF_GUN, CONF_KNIFE, DEFAULT_CONF
 
-# Val-tuned operating point for the v2 weights (Gun: constrained
-# F1-optimal at precision >= 0.90; Knife: F1-optimal). Re-tune after the
-# v2.1 fine-tune — see sentinel-dataset-v2/thresholds/operating_point.md.
-DEFAULT_CONF_GUN = 0.44
-DEFAULT_CONF_KNIFE = 0.43
-# Generic fallback for any class without a per-class threshold.
-DEFAULT_CONF = 0.40
+# How long the display loop waits for the inference worker on exit.
+WORKER_JOIN_TIMEOUT_S = 2.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SENTINEL weapon demo (FR-02 + FR-05)")
@@ -101,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Single confidence threshold for all classes. When omitted, "
         "the per-class operating point below is used instead (Gun "
-        f"{DEFAULT_CONF_GUN:.2f}, Knife {DEFAULT_CONF_KNIFE:.2f}); when "
+        f"{CONF_GUN:.2f}, Knife {CONF_KNIFE:.2f}); when "
         "given, it is the fallback for any class without its own "
         "--conf-<class> override.",
     )
@@ -110,7 +108,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Confidence threshold for Gun only (default: "
-        f"{DEFAULT_CONF_GUN:.2f}, the val-tuned operating point). "
+        f"{CONF_GUN:.2f}, the val-tuned operating point). "
         "Overrides --conf for this class.",
     )
     parser.add_argument(
@@ -118,7 +116,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Confidence threshold for Knife only (default: "
-        f"{DEFAULT_CONF_KNIFE:.2f}, the val-tuned operating point). "
+        f"{CONF_KNIFE:.2f}, the val-tuned operating point). "
         "Overrides --conf for this class.",
     )
     parser.add_argument(
@@ -155,13 +153,31 @@ def parse_args() -> argparse.Namespace:
         help="Where confirmed-threat snapshots are saved.",
     )
     parser.add_argument("--no-snapshots", action="store_true", help="Disable snapshot saving.")
-    parser.add_argument("--save-video", default=None, help="Optional path to record the annotated video.")
+    parser.add_argument(
+        "--save-video",
+        default=None,
+        help="Optional path to record the video. Records the RAW "
+        "(un-annotated) frames by default — see --no-record-raw.",
+    )
+    parser.add_argument(
+        "--no-record-raw",
+        dest="record_raw",
+        action="store_false",
+        help="Record the ANNOTATED video instead of the raw frames. "
+        "By default --save-video records raw frames, so a gate "
+        "session yields minable training data.",
+    )
     parser.add_argument(
         "--loop",
         action="store_true",
         help="Loop a video file when it ends instead of exiting (file sources only).",
     )
-    parser.add_argument("--device", default=None, help="'cuda', 'cpu', or omit for auto.")
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="'cuda', 'cpu', 'xpu', or omit for auto: OpenVINO folders "
+        "auto-select the Intel GPU (xpu) when one is available.",
+    )
     args = parser.parse_args()
     for name in ("conf", "conf_gun", "conf_knife"):
         value = getattr(args, name)
@@ -187,12 +203,12 @@ def resolve_thresholds(args: argparse.Namespace) -> tuple[float, float, float]:
     conf_gun = (
         args.conf_gun
         if args.conf_gun is not None
-        else args.conf if args.conf is not None else DEFAULT_CONF_GUN
+        else args.conf if args.conf is not None else CONF_GUN
     )
     conf_knife = (
         args.conf_knife
         if args.conf_knife is not None
-        else args.conf if args.conf is not None else DEFAULT_CONF_KNIFE
+        else args.conf if args.conf is not None else CONF_KNIFE
     )
     fallback_conf = args.conf if args.conf is not None else DEFAULT_CONF
     return conf_gun, conf_knife, fallback_conf
@@ -246,13 +262,36 @@ def main() -> int:
         return 1
 
     conf_gun, conf_knife, fallback_conf = resolve_thresholds(args)
-    detector = WeaponDetector(
-        args.weights,
-        conf_threshold=fallback_conf,
-        conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
-        imgsz=args.imgsz,
-        device=args.device,
-    )
+    device = args.device
+    if device is None:
+        # Auto-select the Intel GPU for OpenVINO folders, the same way
+        # the web UI runner does (shared helper); .pt weights keep
+        # ultralytics' auto-detect.
+        device = detect_openvino_device(args.weights)
+    try:
+        detector = WeaponDetector(
+            args.weights,
+            conf_threshold=fallback_conf,
+            conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
+            imgsz=args.imgsz,
+            device=device,
+        )
+    except FileNotFoundError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(
+            f"ERROR: could not load weights {args.weights!r}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        # Warm up BEFORE capture starts, so the first seconds do not
+        # stream past unanalysed while the graph compiles.
+        detector.warmup(tracker=args.tracker)
+    except Exception as exc:
+        print(f"ERROR: model warmup failed: {exc}", file=sys.stderr)
+        return 1
     voter = TrackClassVoter(min_hits=args.min_hits)
     source: int | str = int(args.source) if args.source.isdigit() else args.source
 
@@ -263,6 +302,7 @@ def main() -> int:
 
     print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
     print(f"Confidence thresholds: Gun={conf_gun:.2f} Knife={conf_knife:.2f}")
+    print(f"Device: {device or 'auto'}")
     print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits})")
     print("Press q to quit, r to reset the tracker and class voter.")
 
@@ -271,76 +311,113 @@ def main() -> int:
     display_fps = 0.0
     display_fps_counter = RollingFps()
     last_shown_index = 0
-    with FrameSource(source, loop_file=args.loop) as stream:
-        worker = InferenceWorker(
-            stream,
-            detector,
-            voter,
-            cv2_module=cv2,
-            tracker=args.tracker,
-            snapshots_dir=snapshots_dir,
-        )
-        worker.start()
-        try:
-            while True:
-                packet = stream.read()
-                if packet is not None and packet[0] != last_shown_index:
-                    frame_index, _ts, frame = packet
-                    last_shown_index = frame_index
-                    tick = time.monotonic()
-                    display_fps = display_fps_counter.tick(tick)
+    user_quit = False
+    stream = FrameSource(source, loop_file=args.loop)
+    try:
+        stream.start()
+    except RuntimeError as exc:
+        # Unopenable source (missing file, busy webcam): a clear error,
+        # not a raw traceback.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    worker = InferenceWorker(
+        stream,
+        detector,
+        voter,
+        cv2_module=cv2,
+        tracker=args.tracker,
+        snapshots_dir=snapshots_dir,
+    )
+    worker.start()
+    try:
+        while True:
+            # A dead worker freezes the verdicts while the video
+            # plays on — check every iteration, not never.
+            if worker.error is not None:
+                break
+            packet = stream.read()
+            if packet is not None and packet[0] != last_shown_index:
+                frame_index, _ts, frame = packet
+                last_shown_index = frame_index
+                tick = time.monotonic()
+                display_fps = display_fps_counter.tick(tick)
 
-                    detections, confirmed, inference_fps = worker.latest()
-                    display = draw_annotations(
-                        cv2, frame, detections, confirmed,
-                        hide_unconfirmed=args.hide_unconfirmed,
-                    )
-                    draw_hud(cv2, display, display_fps, inference_fps, frame_index, len(confirmed))
-                    if args.save_video and not writer_failed:
-                        if writer is None:
-                            height, width = display.shape[:2]
-                            writer = cv2.VideoWriter(
-                                args.save_video,
-                                cv2.VideoWriter_fourcc(*"mp4v"),
-                                stream.source_fps or 25.0,
-                                (width, height),
+                detections, confirmed, inference_fps = worker.latest()
+                display = draw_annotations(
+                    cv2, frame, detections, confirmed,
+                    hide_unconfirmed=args.hide_unconfirmed,
+                )
+                draw_hud(cv2, display, display_fps, inference_fps, frame_index, len(confirmed))
+                if args.save_video and not writer_failed:
+                    if writer is None:
+                        height, width = display.shape[:2]
+                        writer = cv2.VideoWriter(
+                            args.save_video,
+                            cv2.VideoWriter_fourcc(*"mp4v"),
+                            stream.source_fps or FALLBACK_FPS,
+                            (width, height),
+                        )
+                        if not writer.isOpened():
+                            print(
+                                f"WARNING: cannot record to {args.save_video!r}; "
+                                "recording disabled for this run."
                             )
-                            if not writer.isOpened():
-                                print(
-                                    f"WARNING: cannot record to {args.save_video!r}; "
-                                    "recording disabled for this run."
-                                )
-                                writer.release()
-                                writer = None
-                                writer_failed = True
-                        if writer is not None:
-                            writer.write(display)
-                    # Only the on-screen copy is scaled to fit the screen;
-                    # recordings and snapshots keep the original resolution.
-                    shown = fit_for_display(cv2, display, args.display_width, args.display_height)
-                    cv2.imshow(WINDOW_NAME, shown)
-                    try:
-                        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-                            break  # window closed with the X button
-                    except cv2.error:
-                        break
-                elif stream.ended and not args.loop:
+                            writer.release()
+                            writer = None
+                            writer_failed = True
+                    if writer is not None:
+                        # Raw frames by default: the annotated
+                        # recording is useless as training data.
+                        writer.write(frame if args.record_raw else display)
+                # Only the on-screen copy is scaled to fit the screen;
+                # recordings and snapshots keep the original resolution.
+                shown = fit_for_display(cv2, display, args.display_width, args.display_height)
+                cv2.imshow(WINDOW_NAME, shown)
+                try:
+                    if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                        user_quit = True
+                        break  # window closed with the X button
+                except cv2.error:
+                    user_quit = True
                     break
+            elif stream.ended and not args.loop:
+                break
 
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    break
-                if key == ord("r"):
-                    worker.request_reset()
-                if packet is None or packet[0] == last_shown_index:
-                    time.sleep(0.002)
-        finally:
-            worker.stop()
-            worker.join(timeout=2.0)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                user_quit = True
+                break
+            if key == ord("r"):
+                worker.request_reset()
+            if packet is None or packet[0] == last_shown_index:
+                time.sleep(0.002)
+    finally:
+        worker.stop()
+        worker.join(timeout=WORKER_JOIN_TIMEOUT_S)
+        stream.release()
 
     if writer is not None:
         writer.release()
     cv2.destroyAllWindows()
+    if worker.error is not None:
+        print(f"ERROR: inference failed: {worker.error}", file=sys.stderr)
+        return 1
+    if stream.ended and not user_quit:
+        # A live source only ends by dying, and a file that produced
+        # zero frames never played: neither is a clean "Demo ended."
+        if stream.is_live:
+            print(
+                "ERROR: camera disconnected (the live stream ended "
+                f"unexpectedly: {stream.end_reason or 'unknown reason'}).",
+                file=sys.stderr,
+            )
+            return 1
+        if last_shown_index == 0:
+            print(
+                "ERROR: could not read video (no frames decoded).",
+                file=sys.stderr,
+            )
+            return 1
     print("Demo ended.")
     return 0
 

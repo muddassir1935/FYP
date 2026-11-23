@@ -6,13 +6,13 @@
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-green.svg)](https://github.com/ultralytics/ultralytics)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Async%20Backend-009688.svg)](https://fastapi.tiangolo.com/)
 [![React + Vite](https://img.shields.io/badge/React%2018-Vite-61dafb.svg)](https://vitejs.dev/)
-[![Status: In Development](https://img.shields.io/badge/Status-Phase%202%20(Datasets)-orange.svg)]()
+[![Status: In Development](https://img.shields.io/badge/Status-Phase%203%20(Weapon%20Pipeline%20%26%20Demo)-orange.svg)]()
 
 ---
 
 ## 📌 Executive Summary
 
-**SENTINEL** is an intelligent, real-time edge surveillance system engineered to overcome human cognitive fatigue in CCTV monitoring. While human operators miss up to 90% of suspicious activities after 20 minutes of continuous monitoring, SENTINEL operates continuously at **≥25 FPS** on consumer-grade edge GPUs, autonomously detecting lethal weapons and classifying violent physical interactions.
+**SENTINEL** is an intelligent, real-time edge surveillance system engineered to overcome human cognitive fatigue in CCTV monitoring. Human monitoring accuracy drops sharply over a shift [citation needed], and SENTINEL is built to watch without tiring. **As of FYP-I (Nov 2026), the weapon-detection stream is live**: the YOLOv8s detector runs at **≥25 FPS** on the demo laptop (Intel Iris Xe via OpenVINO — 39 FPS inference, ~30 FPS end-to-end), autonomously detecting guns and knives. The behavior stream (pose + LSTM classification of violent interactions) is dataset-ready — 3,579 pose sequences — but the model itself is FYP-II work, as are email alerts and the React dashboard.
 
 Unlike traditional systems that rely on slow, compute-heavy 3D-CNNs or single-frame weapon detectors that cause false alarms, SENTINEL introduces a **Dual-Stream Architecture** combining:
 1. **Spatial Stream (Weapon Detection)**: Fine-tuned **YOLOv8s** for rapid identification of guns and knives.
@@ -21,7 +21,12 @@ Unlike traditional systems that rely on slow, compute-heavy 3D-CNNs or single-fr
 
 ---
 
-## 🏗️ System Architecture
+## 🏗️ System Architecture — TARGET (proposal design, not all built yet)
+
+> This is the **target architecture** from the approved proposal. Components
+> marked **[FYP-II]** are not built yet; the FYP-I demo is the weapon stream
+> + temporal buffer + a vanilla single-page console (see
+> `docs/demo_ui_plan.md`, shipped as PR #35).
 
 ```mermaid
 flowchart TD
@@ -29,12 +34,12 @@ flowchart TD
     
     subgraph DualStream [Dual-Stream AI Pipeline]
         B --> C[Spatial Stream: YOLOv8s]
-        B --> D[Temporal Stream: YOLOv8m-Pose]
+        B --> D[Temporal Stream: YOLOv8m-Pose — FYP-II]
         
         C -->|Bounding Boxes & Conf| E[Weapon: Gun / Knife]
-        D -->|17 Skeleton Keypoints 51-dim| F[30-Frame Sequence Buffer]
-        F --> G[2-Layer LSTM Classifier]
-        G -->|Class Probabilities| H[Behavior: Fighting / Robbery / Shooting / Normal]
+        D -->|17 Skeleton Keypoints 51-dim| F[30-Frame Sequence Buffer — FYP-II]
+        F --> G[2-Layer LSTM Classifier — FYP-II]
+        G -->|Class Probabilities| H[Behavior: Fighting / Robbery / Shooting / Normal — FYP-II]
     end
     
     E --> I[Temporal Consistency Buffer]
@@ -44,10 +49,10 @@ flowchart TD
     I -->|Transient Noise| K[Discard Glitch]
     
     subgraph OutputDelivery [Incident Management & Real-Time UI]
-        J --> L[(SQLite Incident DB)]
-        J -->|Alert Push| M[Multi-Channel Alerts: Email + Siren]
-        J -->|WebSocket Frame & Metadata Stream| N[React + Vite Dashboard]
-        N --> O[HTML5 Canvas GPU Overlay]
+        J --> L[(SQLite Incident DB — FYP-II)]
+        J -->|Alert Push| M[Multi-Channel Alerts: Email + Siren — Email FYP-II]
+        J -->|WebSocket Frame & Metadata Stream — FYP-II; v1 uses MJPEG| N[React + Vite Dashboard — FYP-II; v1 is a vanilla console]
+        N --> O[HTML5 Canvas GPU Overlay — FYP-II]
     end
 ```
 
@@ -81,7 +86,13 @@ FYP/
 │   ├── project_decisions.md        # Technical trade-off matrix & choices
 │   ├── roadmap_wbs.md              # 10-Month milestone schedule & dates
 │   ├── capability_matrix.md        # Literature review comparison against state-of-the-art
-│   └── team_responsibilities.md    # Work Breakdown Structure (WBS) & member tasks
+│   ├── team_responsibilities.md    # Work Breakdown Structure (WBS) & member tasks
+│   ├── training_run_log.md         # Every training run: config, metrics, weights hashes
+│   ├── dataset_summary.md          # Dataset versions, splits & the leakage record
+│   ├── engineering_logbook.md      # Dated engineering decisions & dataset evolution
+│   ├── demo_ui_plan.md             # Demo web UI plan, API & verification (shipped PR #35)
+│   ├── pipeline_weapon_demo.md     # Weapon pipeline, OpenVINO & demo tuning knobs
+│   └── rq3_temporal_buffer.md      # RQ3: temporal-buffer FP-suppression measurement
 │
 ├── DataSets/                       # Dataset directories (tracked via .gitkeep)
 │   ├── README.md                   # Instructions for downloading Kaggle, UCF-Crime & RWF-2000

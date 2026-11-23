@@ -26,8 +26,11 @@ what an academic eval needs: automatic tags, no hand labelling, and
 plain P/R/F1 per slice instead of their ratio gate.
 
 Uses ultralytics directly (like audit-v4/clean_test_eval.py) instead of
-WeaponDetector, because eval needs raw detections at one fixed
-confidence, not the demo's per-class thresholds.
+WeaponDetector, because eval needs raw detections at a chosen confidence,
+including the demo's per-class thresholds (--conf-gun/--conf-knife).
+Per-detection confidences are persisted in the JSON ("dets" per image,
+captured at the predict floor) so slice numbers can be recomputed at any
+threshold >= that floor without re-running inference.
 
 Usage (from the repo root):
     python scripts/evaluation/slice_eval.py \\
@@ -226,7 +229,16 @@ def main() -> int:
     parser.add_argument("--images", required=True, help="Test images dir.")
     parser.add_argument("--labels", required=True, help="YOLO labels dir.")
     parser.add_argument("--conf", type=float, default=0.25,
-                        help="Detection confidence (0.25 matches the hard-frame eval).")
+                        help="Detection confidence (flat, both classes). "
+                        "0.25 is the v3/v4 comparability setting; the "
+                        "hard-frame evals use 0.40 flat and the shipped "
+                        "demo uses per-class Gun 0.44 / Knife 0.43 "
+                        "(--conf-gun/--conf-knife). The v5 slice gate runs "
+                        "at the gate operating point, not 0.25.")
+    parser.add_argument("--conf-gun", type=float, default=None,
+                        help="Gun confidence (overrides --conf for Gun).")
+    parser.add_argument("--conf-knife", type=float, default=None,
+                        help="Knife confidence (overrides --conf for Knife).")
     parser.add_argument("--iou", type=float, default=0.5, help="Matching IoU.")
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
@@ -255,6 +267,14 @@ def main() -> int:
     if not image_paths:
         print(f"No images found in {images_dir}", file=sys.stderr)
         return 1
+
+    # Effective per-class thresholds; inference runs at the lower of the
+    # two so per-class filtering happens in scoring, and every captured
+    # detection (with its confidence) is persisted for later re-scoring.
+    conf_gun = args.conf_gun if args.conf_gun is not None else args.conf
+    conf_knife = args.conf_knife if args.conf_knife is not None else args.conf
+    conf_by_class = {0: conf_gun, 1: conf_knife}
+    capture_conf = min(conf_gun, conf_knife)
 
     model = YOLO(str(args.weights))
 
@@ -287,18 +307,26 @@ def main() -> int:
 
         results = model.predict(
             source=str(image_path),
-            conf=args.conf,
+            conf=capture_conf,
             imgsz=args.imgsz,
             device=args.device,
             verbose=False,
         )
         preds: List[Tuple[Box, float]] = []
+        captured_dets: List[dict] = []
         for box in results[0].boxes:
             class_id = int(box.cls.item())
             if class_id not in CLASS_NAMES:
                 continue
             x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-            preds.append((Box(class_id, x1, y1, x2, y2), float(box.conf.item())))
+            conf = float(box.conf.item())
+            captured_dets.append(
+                {"cls": class_id, "conf": round(conf, 4),
+                 "xyxy": [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)]}
+            )
+            if conf < conf_by_class[class_id]:
+                continue
+            preds.append((Box(class_id, x1, y1, x2, y2), conf))
         n_pred_total += len(preds)
 
         tp_pairs, fps, fns = match(preds, gts, args.iou)
@@ -335,6 +363,10 @@ def main() -> int:
                 "blur": blur,
                 "n_gt": len(gts),
                 "n_pred": len(preds),
+                # All detections at/above the capture floor, with
+                # confidences — slice numbers can be recomputed at any
+                # threshold >= capture_conf without re-running inference.
+                "dets": captured_dets,
             }
         )
 
@@ -347,7 +379,8 @@ def main() -> int:
 
     print(f"Weights: {args.weights}")
     print(f"Images: {n_images} ({n_no_gt} negatives), GT boxes: {n_gt}, "
-          f"preds: {n_pred_total} (conf={args.conf}, IoU={args.iou})")
+          f"preds: {n_pred_total} (Gun conf={conf_gun}, Knife conf={conf_knife}, "
+          f"capture floor={capture_conf}, IoU={args.iou})")
     if skipped_lines:
         print(f"Warning: {skipped_lines} malformed label lines skipped")
     if unreadable:
@@ -372,6 +405,9 @@ def main() -> int:
             "images_dir": str(images_dir),
             "labels_dir": str(labels_dir),
             "conf": args.conf,
+            "conf_gun": conf_gun,
+            "conf_knife": conf_knife,
+            "capture_conf": capture_conf,
             "iou": args.iou,
             "imgsz": args.imgsz,
             "n_images": n_images,

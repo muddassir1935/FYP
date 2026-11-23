@@ -1,14 +1,22 @@
 # SENTINEL — Python dependencies for the weapon pipeline + demo web UI.
-# Pinned to the versions tested on 2026-11-21 (Python 3.12, CPU).
+# Pinned to the versions tested on 2026-11-21 (Python 3.12, CPU),
+# plus openvino, which the OpenVINO model path needs and which was
+# missing here entirely (2026.4.1 = the version in the tested venv).
 # Weights are never in Git: download best.pt (or an OpenVINO export)
 # from Drive SENTINEL_FYP/runs/ into models/weights/ (see
 # docs/training_run_log.md).
 
+# The +cpu torch build below lives only on the PyTorch CPU index, not
+# on PyPI — without this line `pip install -r requirements.txt` fails
+# to resolve torch. (PyPI stays the default index for everything else.)
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 # Inference
 ultralytics==8.4.215
-opencv-python==5.0.0
+opencv-python==5.0.0.93
 numpy==2.4.6
 torch==2.15.0+cpu
+openvino==2026.4.1
 # NOTE: the +cpu torch build above is for CPU-only machines. On a CUDA
 # machine, install torch for your CUDA version from pytorch.org first,
 # then install the rest of this file.

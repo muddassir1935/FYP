@@ -25,10 +25,18 @@ def draw_annotations(
     label across frames.
     """
     display = frame.copy()
-    confirmed_by_id = {id(cd.detection): cd for cd in confirmed}
+    # Match confirmed threats by track_id (carried on the voted
+    # Detection), not by object identity: any caller that rebuilds
+    # Detection objects would otherwise draw confirmed threats as
+    # unconfirmed grey boxes.
+    confirmed_by_track = {cd.track_id: cd for cd in confirmed}
     font = cv2_module.FONT_HERSHEY_SIMPLEX
     for det in detections:
-        cd = confirmed_by_id.get(id(det))
+        cd = (
+            confirmed_by_track.get(det.track_id)
+            if det.track_id is not None
+            else None
+        )
         if cd is None and hide_unconfirmed:
             continue
         x1, y1, x2, y2 = (int(v) for v in det.bbox)

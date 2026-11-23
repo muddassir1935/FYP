@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
     from fastapi.testclient import TestClient
@@ -23,6 +24,12 @@ try:
     FASTAPI_AVAILABLE = True
 except ImportError:
     FASTAPI_AVAILABLE = False
+
+try:
+    from helpers import CV2_AVAILABLE, make_tiny_video
+except ImportError:  # pragma: no cover - helpers missing
+    CV2_AVAILABLE = False
+    make_tiny_video = None  # type: ignore[assignment]
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi not installed")
@@ -37,6 +44,12 @@ class ApiTestCase(unittest.TestCase):
         self.weights.mkdir()
         (self.weights / "best.pt").write_bytes(b"not a model")
         (self.videos / "clip.mp4").write_bytes(b"not a video")
+        # Real playable bytes for the upload-accept tests (the upload
+        # endpoint probes content with OpenCV now, so fake bytes 400).
+        self.video_bytes: bytes | None = None
+        if CV2_AVAILABLE and make_tiny_video is not None:
+            src = make_tiny_video(root / "upload_src.mp4")
+            self.video_bytes = src.read_bytes()
         app = create_app(
             videos_dir=self.videos,
             weights_dir=self.weights,
@@ -75,14 +88,24 @@ class ApiTestCase(unittest.TestCase):
         self.assertEqual(weights[0]["id"], "best.pt")
         self.assertEqual(weights[0]["kind"], "pytorch")
 
-    def test_upload_accepts_video_rejects_other(self) -> None:
+    def test_defaults_endpoint(self) -> None:
+        res = self.client.get("/api/defaults")
+        self.assertEqual(res.status_code, 200)
+        # The shipped operating point (src/pipeline/thresholds.py).
+        self.assertEqual(
+            res.json(),
+            {"conf_gun": 0.44, "conf_knife": 0.43, "conf_fallback": 0.40},
+        )
+
+    def test_upload_rejects_fake_video_bytes(self) -> None:
+        # Fake bytes with a video extension used to upload with 201
+        # and fail only at run start; the upload is probed now.
         res = self.client.post(
             "/api/upload",
-            files={"file": ("new.mp4", b"fake video bytes", "video/mp4")},
+            files={"file": ("fake.mp4", b"fake video bytes", "video/mp4")},
         )
-        self.assertEqual(res.status_code, 201)
-        self.assertEqual(res.json()["name"], "uploads/new.mp4")
-        self.assertTrue((self.videos / "uploads" / "new.mp4").is_file())
+        self.assertEqual(res.status_code, 400)
+        self.assertFalse((self.videos / "uploads" / "fake.mp4").exists())
 
         res = self.client.post(
             "/api/upload",
@@ -90,20 +113,36 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 400)
 
-    def test_upload_strips_directory_parts(self) -> None:
+    @unittest.skipUnless(CV2_AVAILABLE, "cv2 not installed")
+    def test_upload_accepts_real_video(self) -> None:
+        assert self.video_bytes is not None
         res = self.client.post(
             "/api/upload",
-            files={"file": ("../escape.mp4", b"x", "video/mp4")},
+            files={"file": ("new.mp4", self.video_bytes, "video/mp4")},
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.json()["name"], "uploads/new.mp4")
+        self.assertTrue((self.videos / "uploads" / "new.mp4").is_file())
+        self.assertIsNotNone(res.json()["duration_s"])
+
+    @unittest.skipUnless(CV2_AVAILABLE, "cv2 not installed")
+    def test_upload_strips_directory_parts(self) -> None:
+        assert self.video_bytes is not None
+        res = self.client.post(
+            "/api/upload",
+            files={"file": ("../escape.mp4", self.video_bytes, "video/mp4")},
         )
         self.assertEqual(res.status_code, 201)
         self.assertEqual(res.json()["name"], "uploads/escape.mp4")
         self.assertFalse((self.videos.parent / "escape.mp4").exists())
 
+    @unittest.skipUnless(CV2_AVAILABLE, "cv2 not installed")
     def test_delete_uploaded_video_flow_and_guards(self) -> None:
+        assert self.video_bytes is not None
         # Upload a clip first.
         res = self.client.post(
             "/api/upload",
-            files={"file": ("dup.mp4", b"fake video bytes", "video/mp4")},
+            files={"file": ("dup.mp4", self.video_bytes, "video/mp4")},
         )
         self.assertEqual(res.status_code, 201)
         self.assertTrue((self.videos / "uploads" / "dup.mp4").is_file())
@@ -158,6 +197,26 @@ class ApiTestCase(unittest.TestCase):
                   "weights_id": "best.pt"},
         )
         self.assertEqual(res.status_code, 422)
+
+    def test_run_start_bad_source_is_400_not_500(self) -> None:
+        # clip.mp4 exists but is not a playable video: the source
+        # cannot be opened, which is a client error (400), not a
+        # server error. The detector is mocked so the failure is
+        # purely the source open.
+        from unittest.mock import MagicMock, patch
+
+        with patch(
+            "src.backend.runner.WeaponDetector",
+            side_effect=lambda *a, **k: MagicMock(),
+        ):
+            res = self.client.post(
+                "/api/run/start",
+                json={"source_type": "video", "source": "clip.mp4",
+                      "weights_id": "best.pt", "tracker": "bytetrack.yaml",
+                      "record_raw": True},
+            )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Could not open source", res.json()["detail"])
 
     def test_run_start_conflict_when_running(self) -> None:
         self.runner._state = "running"
@@ -257,6 +316,15 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(
             self.client.get("/snapshots/nope.jpg").status_code, 404
+        )
+
+    def test_snapshot_serving_limited_to_threat_files(self) -> None:
+        # A stray .jpg in the snapshots dir lists nowhere and serves
+        # nowhere: only threat_<class>_<stamp>_t<id>.jpg is served.
+        self.snaps.mkdir(exist_ok=True)
+        (self.snaps / "random.jpg").write_bytes(b"x")
+        self.assertEqual(
+            self.client.get("/snapshots/random.jpg").status_code, 404
         )
 
 

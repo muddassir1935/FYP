@@ -114,6 +114,7 @@ class TrackClassVoter:
                 class_name=self._names.get(voted_class, str(voted_class)),
                 confidence=det.confidence,
                 bbox=det.bbox,
+                track_id=track_id,
             )
             visible.append(
                 TrackedDetection(
