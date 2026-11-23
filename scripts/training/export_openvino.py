@@ -35,8 +35,12 @@ INT8 additionally needs ``pip install nncf``):
         --weights models/weights/best_openvino_model --source demo.mp4
 
 The script finishes with a self-check: it loads the exported folder and
-times inference on a blank frame, printing an approximate FPS so the
-speed-up over the ``.pt`` model is visible before running the demo.
+times inference — on a real validation image when ``--data`` is given and
+one can be found, otherwise on a blank frame (labelled explicitly as a
+blank-frame upper bound) — printing an approximate FPS so the speed-up
+over the ``.pt`` model is visible before running the demo. A self-check
+that cannot run does not fail the export: the exit code is 0 with a
+warning, and 1 is reserved for an actual export failure.
 """
 
 from __future__ import annotations
@@ -155,10 +159,23 @@ def main() -> int:
         print(f"Moved model folder to: {exported}")
 
     if not args.skip_check:
-        fps = self_check(exported, args.imgsz)
-        if fps is None:
-            return 1
-        print(f"Self-check OK — blank-frame inference ≈ {fps:.1f} FPS on this machine.")
+        # NICE-4: the export already succeeded — a self-check that cannot
+        # run must not turn it into a failed export (exit 1 is reserved
+        # for actual export failure).
+        checked = self_check(exported, args.imgsz, data_yaml=args.data)
+        if checked is None:
+            print("WARNING: export succeeded but the self-check could not "
+                  "run (see above); the exported model folder is usable.",
+                  file=sys.stderr)
+        else:
+            fps, frame_kind = checked
+            if frame_kind == "real":
+                print(f"Self-check OK — inference on a real validation "
+                      f"image ≈ {fps:.1f} FPS on this machine.")
+            else:
+                print(f"Self-check OK — blank-frame upper bound "
+                      f"≈ {fps:.1f} FPS on this machine (no validation "
+                      f"image found; real frames will be slower).")
 
     print()
     print("Run the demo with the exported model:")
@@ -166,21 +183,74 @@ def main() -> int:
         "  python scripts/inference/run_weapon_demo.py "
         f"--weights {exported} --imgsz {args.imgsz} --source demo.mp4"
     )
-    print("(On recent ultralytics versions, --device intel:gpu selects the Intel iGPU explicitly.)")
+    print("(On recent ultralytics versions, --device xpu selects the Intel iGPU explicitly.)")
     return 0
 
 
-def self_check(exported: Path, imgsz: int) -> float | None:
-    """Load the exported model and time blank-frame inference."""
+def find_val_image(data_yaml: str | None) -> Path | None:
+    """First image of the dataset's val split, or ``None`` if not found.
+
+    The YAML is ultralytics format (``path`` + ``val`` relative to it).
+    Any failure — no YAML given, unparsable, no images — returns ``None``
+    and the caller falls back to a blank frame.
+    """
+    if not data_yaml:
+        return None
+    try:
+        import yaml  # PyYAML ships with ultralytics
+    except ImportError:
+        return None
+    yaml_path = Path(data_yaml)
+    if not yaml_path.exists():
+        return None
+    try:
+        parsed = yaml.safe_load(yaml_path.read_text())
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    root = Path(str(parsed.get("path", yaml_path.parent)))
+    val = parsed.get("val")
+    if not val:
+        return None
+    val_dir = root / str(val) if not Path(str(val)).is_absolute() else Path(str(val))
+    if not val_dir.is_dir():
+        return None
+    for ext in (".jpg", ".jpeg", ".png"):
+        found = sorted(val_dir.glob(f"*{ext}"))
+        if found:
+            return found[0]
+    return None
+
+
+def self_check(exported: Path, imgsz: int,
+               data_yaml: str | None = None) -> tuple[float, str] | None:
+    """Load the exported model and time inference.
+
+    Times on a real validation image when one can be found via
+    ``data_yaml`` (NICE-5); otherwise falls back to a blank frame, which
+    the caller must label a "blank-frame upper bound" — blank frames
+    produce no detections, so NMS/post-processing cost is minimal and
+    real frames will be slower. Returns ``(fps, kind)`` with kind
+    ``"real"`` or ``"blank"``, or ``None`` when the check could not run.
+    """
     try:
         import numpy as np
         from ultralytics import YOLO
     except ImportError as exc:
         print(f"Self-check could not run ({exc}); the export itself is done.", file=sys.stderr)
         return None
+    val_image = find_val_image(data_yaml)
     try:
         model = YOLO(str(exported))
-        frame = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+        if val_image is not None:
+            from PIL import Image  # Pillow ships with ultralytics
+            frame = np.array(Image.open(val_image).convert("RGB"))
+            kind = "real"
+            print(f"Self-check timing on validation image: {val_image.name}")
+        else:
+            frame = np.zeros((imgsz, imgsz, 3), dtype=np.uint8)
+            kind = "blank"
         for _ in range(3):  # warm-up
             model.predict(frame, verbose=False)
         runs = 20
@@ -191,7 +261,9 @@ def self_check(exported: Path, imgsz: int) -> float | None:
     except Exception as exc:  # report, don't crash the export result
         print(f"Self-check FAILED: {exc}", file=sys.stderr)
         return None
-    return runs / elapsed if elapsed > 0 else None
+    if elapsed <= 0:
+        return None
+    return runs / elapsed, kind
 
 
 if __name__ == "__main__":

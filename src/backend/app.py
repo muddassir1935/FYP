@@ -15,8 +15,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from .runner import VIDEO_EXTENSIONS, DemoRunner, RunConfig
+from .runner import SNAPSHOT_RE, VIDEO_EXTENSIONS, DemoRunner, RunConfig
 from .schemas import (
+    DemoDefaults,
     HealthStatus,
     RunStartRequest,
     RunStatus,
@@ -24,6 +25,7 @@ from .schemas import (
     VideoEntry,
     WeightsEntry,
 )
+from src.pipeline.thresholds import as_dict as operating_point_dict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "src" / "frontend"
@@ -92,6 +94,13 @@ def create_app(
             n_videos=len(videos),
         )
 
+    @app.get("/api/defaults", response_model=DemoDefaults)
+    def defaults():
+        # The shipped operating point, from the single source of truth
+        # (src/pipeline/thresholds.py). The frontend fills its inputs
+        # from here instead of hardcoding thresholds of its own.
+        return DemoDefaults(**operating_point_dict())
+
     @app.get("/api/sources", response_model=list[VideoEntry])
     def sources():
         return [VideoEntry(**v) for v in runner.list_videos()]
@@ -106,6 +115,13 @@ def create_app(
             raise HTTPException(404, str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+        except PermissionError as exc:
+            # Unlinking an open file (Windows): the video is in use.
+            raise HTTPException(
+                409, f"Cannot delete {name!r}: the file is in use."
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Could not delete {name!r}: {exc}") from exc
         return {"deleted": deleted}
 
     @app.get("/api/weights", response_model=list[WeightsEntry])
@@ -149,10 +165,20 @@ def create_app(
         except OSError as exc:
             target.unlink(missing_ok=True)
             raise HTTPException(500, f"Could not save the upload: {exc}") from exc
+        # Probe the content, not just the extension: a .txt renamed to
+        # .mp4 used to upload with 201 and fail only at run start.
+        duration = DemoRunner._probe_duration(target)
+        if duration is None:
+            target.unlink(missing_ok=True)
+            raise HTTPException(
+                400,
+                f"OpenCV could not open {file.filename!r} as a video — "
+                "the file is not a playable video.",
+            )
         return VideoEntry(
             name=target.relative_to(videos_dir).as_posix(),
             size_mb=round(written / 1_000_000, 1),
-            duration_s=DemoRunner._probe_duration(target),
+            duration_s=duration,
         )
 
     # -- run control ---------------------------------------------------
@@ -168,9 +194,11 @@ def create_app(
             conf_knife=body.conf_knife,
             imgsz=body.imgsz,
             min_hits=body.min_hits,
+            tracker=body.tracker,
             loop=body.loop,
             hide_unconfirmed=body.hide_unconfirmed,
             save_video=body.save_video,
+            record_raw=body.record_raw,
         )
         try:
             info = runner.start(config)
@@ -265,11 +293,12 @@ def create_app(
 
     @app.get("/snapshots/{name}", include_in_schema=False)
     def snapshot_file(name: str):
-        # Bare filename only: no subdirectories, no ../ escapes.
-        if "/" in name or "\\" in name or name.startswith("."):
+        # Only files the worker actually writes (threat_<class>_<stamp>_t<id>.jpg):
+        # same regex as the listing, so a stray .jpg in the dir is not served.
+        if not SNAPSHOT_RE.match(name):
             raise HTTPException(404, "Snapshot not found.")
         path = snapshots_dir / name
-        if not path.is_file() or path.suffix.lower() != ".jpg":
+        if not path.is_file():
             raise HTTPException(404, "Snapshot not found.")
         return FileResponse(path, media_type="image/jpeg")
 

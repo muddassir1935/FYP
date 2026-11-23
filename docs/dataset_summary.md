@@ -1,7 +1,11 @@
 # 📊 SENTINEL — Curated Dataset Preprocessing & Verification Report
 
 > **Generated Automatically**: 2026-10-17 16:09:30  
-> **Status**: Verified & Synchronized with FYP-I Master Proposal
+> **Status**: Verified & Synchronized with FYP-I Master Proposal  
+> **Update (2026-11-23):** §1 describes the v1 weapon dataset only. The
+> weapon dataset has since gone through v2, v2.1, v3 and v4 — see the new
+> §4. The "Zero Data Leakage" checkbox in §3 is scoped to the **behavior**
+> dataset only (see the weapon-dataset leakage note below).
 
 ---
 
@@ -55,7 +59,52 @@
 ## 3. 🛡️ Quality Assurance & Engineering Integrity
 
 * [x] **Path Independence**: All preprocessing scripts use dynamic `pathlib.Path` resolution.
-* [x] **Zero Data Leakage**: Video streams partitioned strictly prior to sequence windowing.
+* [x] **Zero Data Leakage — BEHAVIOR dataset only**: Video streams
+  partitioned strictly prior to sequence windowing (§2). This checkbox
+  does **not** cover the weapon dataset — see the leakage note below.
+* [ ] **Weapon dataset leakage (found by the Stage-1 audit, 21 Nov 2026):**
+  the weapon split was random by frame, and `source_B` video frames were
+  split across train/test. **169/680 test images (25%)** have a verified
+  near-duplicate in train, including **18 byte-identical** train/test
+  pairs; **303/1,351 val images (22%)** leak into train the same way.
+  All frozen-test mAP50 numbers (v1–v4) are therefore leakage-inflated;
+  the honest series is the cleaned-511 test (see
+  `docs/training_run_log.md`). Full findings:
+  `audit-v4/audit_stage1_report.md` (dataset workspace).
 * [x] **Coordinate Normalization**: All bounding boxes clamped to `[0.0, 1.0]`; degenerate boxes discarded.
 * [x] **Corrupted File Quarantine**: Quarantined items tracked in [`DataSets/raw/quarantine_log.txt`](../DataSets/raw/quarantine_log.txt).
 * [x] **Git Cleanliness**: Raw datasets, videos, images, and `.npy` binaries are ignored in [`.gitignore`](../.gitignore).
+
+---
+
+## 4. 🗡️ Weapon Dataset Versions — v2 / v2.1 / v3 / v4 (added 2026-11-23)
+
+§1 above describes v1 only (6,762 images). The weapon dataset evolved
+through four further versions in November 2026. Val (1,351) and test
+(680) are **frozen** — byte-identical across v2, v2.1, v3 and v4; only
+the train split changes. Counts verified from the dataset dirs on disk;
+local zips in the dataset workspace (`out/`).
+
+| Version | Train | Val | Test | What changed | Local zip (MD5) |
+|:---|---:|---:|---:|---|---|
+| **v2** (17 Nov) | 21,809 | 1,351 | 680 | Quality sweep of the v1 train set: every new image eye-reviewed; Knife 2x oversampling at train time (1,889 knife images → 23,698 effective exposures) | `weapon_yolo_v2.zip` (`02cd71ae0ab617da7de0653e6c7522bf`) |
+| **v2.1** (20 Nov) | 13,242 | 1,351 | 680 | Hard-example mining: 10,905 v2 replay (0.5×) + 855 pixel-verified mined frames + 1,177 Roboflow knife + 305 weather variants | `weapon_yolo_v21.zip` (`8be99d786ed8481163e90957d419c3e8`) |
+| **v3** (20 Nov) | 24,146 | 1,351 | 680 | Full v2 train (21,809) + all v2.1 hard data (855 + 1,177 + 305) — the combined set for the v3 full retrain | `weapon_yolo_v3.zip` (`f0a66e81770ed4fc6fe403fe5b12387a`) |
+| **v4** (21 Nov) | 23,268 | 1,351 | 680 | Audit-cleaned: 23,123 clean v3 replay (Stage-1 + Stage-2 audits: 1,023 exclusions, 25 flips, 26 adds, 5 reboxes) + 145 user-reviewed Test8/Test9 hard frames | `weapon_yolo_v4.zip` (`3fbe9e6220a93e324028d20755d53255`) |
+
+Notes:
+
+* The v2/v3 assembly reports' "CLEAN — 0 leakage" verdicts covered only
+  the **new** pool frames vs test; the v2 train portion was never checked
+  against test until the Stage-1 audit (21 Nov), which found the 25%
+  test / 22% val leakage in §3. See the dated addendum in
+  `V3_ASSEMBLY_REPORT.md`.
+* v4ft (train 4,145 = 4,000 clean v3 replay sampled after the 897
+  Stage-1 exclusions + 145 Test8/Test9 frames) was a fine-tune-only
+  dataset; it has no separate version line above because it reuses the
+  v4 pool. Zip `weapon_yolo_v4ft.zip`
+  (`81a7fe131f73fe0444e1708dddf269b7`).
+* The grown test set (cleaned 511 + 956 new images = 1,467) and the
+  cleaned val (1,048) are evaluation sets built during the v5 audit
+  (`audit-v5/`), not dataset versions — they do not change the splits
+  above.

@@ -5,18 +5,25 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from src.pipeline.thresholds import CONF_GUN, CONF_KNIFE, DEFAULT_CONF
+
 
 class RunStartRequest(BaseModel):
     source_type: str = Field(..., pattern="^(webcam|video)$")
     source: str = Field(..., min_length=1)
     weights_id: str = Field(..., min_length=1)
-    conf_gun: float = Field(0.44, gt=0.0, le=1.0)
-    conf_knife: float = Field(0.43, gt=0.0, le=1.0)
+    conf_gun: float = Field(CONF_GUN, gt=0.0, le=1.0)
+    conf_knife: float = Field(CONF_KNIFE, gt=0.0, le=1.0)
     imgsz: int = Field(640, ge=320, le=1280)
     min_hits: int = Field(3, ge=1, le=30)
+    tracker: str = Field("bytetrack.yaml", min_length=1)
     loop: bool = False
     hide_unconfirmed: bool = False
     save_video: bool = False
+    # When saving video, record the raw (un-annotated) frames by
+    # default — the annotated recording is useless as training data,
+    # and the gate session is the main source of v5 mining frames.
+    record_raw: bool = True
 
 
 class RunStatus(BaseModel):
@@ -29,9 +36,12 @@ class RunStatus(BaseModel):
     detections: int = 0
     confirmed: int = 0
     snapshots: int = 0
-    started_at: float | None = None
     elapsed_s: float = 0.0
     error: str | None = None
+    # Non-fatal problems the operator should know about (e.g. the Intel
+    # GPU compile failed and the run fell back to CPU, or the video
+    # recording could not be opened). Shown in the console status line.
+    warning: str | None = None
     saved_video: str | None = None
 
 
@@ -63,3 +73,15 @@ class HealthStatus(BaseModel):
     videos_dir_exists: bool
     n_weights: int
     n_videos: int
+
+
+class DemoDefaults(BaseModel):
+    """The shipped demo operating point (from src/pipeline/thresholds).
+
+    Served by GET /api/defaults so the frontend never hardcodes
+    thresholds of its own.
+    """
+
+    conf_gun: float = CONF_GUN
+    conf_knife: float = CONF_KNIFE
+    conf_fallback: float = DEFAULT_CONF

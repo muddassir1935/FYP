@@ -12,8 +12,11 @@ models/weights/ before starting (or upload a clip from the UI).
 from __future__ import annotations
 
 import argparse
+import logging
 import socket
 import sys
+import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -21,10 +24,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 
 def _port_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         return sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _port_listening(host: str, port: int) -> bool:
+    """True when something accepts TCP on (host, port)."""
+    target = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    family = socket.AF_INET6 if ":" in target else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            return sock.connect_ex((target, port)) == 0
+    except OSError:
+        return False
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,11 +54,29 @@ def parse_args() -> argparse.Namespace:
                         help="Folder with video clips (default: videos/).")
     parser.add_argument("--weights-dir", default=None,
                         help="Folder with weights (default: models/weights/).")
+    parser.add_argument("--snapshots-dir", default=None,
+                        help="Folder for threat snapshots (default: snapshots/).")
+    parser.add_argument("--save-video-dir", default=None,
+                        help="Folder for recorded videos "
+                        "(default: videos/recordings/).")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    # The runner logs run start/stop/error + per-run summaries through
+    # the logging module; make sure they reach the terminal.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    if args.host not in LOOPBACK_HOSTS:
+        print(
+            f"WARNING: binding to {args.host} — the demo console has no "
+            "authentication, including on POST /api/server/shutdown. "
+            "Only do this on a trusted network.",
+            file=sys.stderr,
+        )
     try:
         import uvicorn
     except ImportError:
@@ -67,6 +102,8 @@ def main() -> int:
     app = create_app(
         videos_dir=Path(args.videos_dir) if args.videos_dir else None,
         weights_dir=Path(args.weights_dir) if args.weights_dir else None,
+        snapshots_dir=Path(args.snapshots_dir) if args.snapshots_dir else None,
+        save_video_dir=Path(args.save_video_dir) if args.save_video_dir else None,
     )
     # Own the Server object (instead of uvicorn.run) so the console's
     # Stop server button can shut the process down via should_exit.
@@ -77,9 +114,39 @@ def main() -> int:
     print("SENTINEL demo console")
     print(f"  Open {url}")
     print("  Stop: Ctrl+C here, or the Stop server button in the console.")
+    # Run the server on a thread so the browser opens only AFTER the
+    # server has bound the port (it used to open first, so the first
+    # load could hit connection-refused on a slow machine). Waiting for
+    # the bind also settles the _port_free check-then-bind race: if the
+    # port was taken in between, the server thread dies and we report
+    # it instead of opening a dead URL.
+    thread = threading.Thread(
+        target=server.run, name="sentinel-uvicorn", daemon=True
+    )
+    thread.start()
+    bound = False
+    for _ in range(100):  # up to ~10 s for a slow first bind
+        if not thread.is_alive():
+            break
+        if _port_listening(args.host, port):
+            bound = True
+            break
+        time.sleep(0.1)
+    if not bound:
+        print(
+            f"The server did not start listening on {url} — is the port "
+            "taken by another process?",
+            file=sys.stderr,
+        )
+        return 1
     if not args.no_browser:
         webbrowser.open(url)
-    server.run()
+    try:
+        while thread.is_alive():
+            thread.join(timeout=0.5)
+    except KeyboardInterrupt:
+        server.should_exit = True
+        thread.join(timeout=10)
     return 0
 
 

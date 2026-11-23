@@ -22,6 +22,15 @@ from typing import Optional, Tuple, Union
 Frame = object
 FramePacket = Tuple[int, float, Frame]  # (frame_index, monotonic_ts, frame)
 
+# Fallback frame rate for recording when the source reports no FPS
+# (live cameras, or files OpenCV cannot probe). Shared by the runner
+# and the CLI so both record at the same rate.
+FALLBACK_FPS = 25.0
+# How long release() waits for the reader thread before giving up.
+READER_JOIN_TIMEOUT_S = 2.0
+# Idle sleep in the reader loop (paused, or between failed reads).
+READER_IDLE_SLEEP_S = 0.02
+
 
 class FrameSource:
     """Latest-frame video source running on its own thread.
@@ -49,6 +58,12 @@ class FrameSource:
         self._latest: Optional[FramePacket] = None
         self._running = False
         self._ended = False
+        # Why the reader stopped: "eof" (clean end of a file), or
+        # "read_failures" (live source died, or a file that cannot be
+        # decoded). None while running or when release() stopped it.
+        # Callers use this to tell "video finished" from "camera died".
+        self._end_reason: Optional[str] = None
+        self._end_error: Optional[str] = None
         self._paused = threading.Event()
 
     # -- lifecycle ---------------------------------------------------------
@@ -77,7 +92,7 @@ class FrameSource:
         self._running = False
         self._paused.clear()
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=READER_JOIN_TIMEOUT_S)
             self._thread = None
         if self._cap is not None:
             self._cap.release()
@@ -113,6 +128,23 @@ class FrameSource:
         """True when a file source reached EOF or the stream died."""
         return self._ended
 
+    @property
+    def end_reason(self) -> Optional[str]:
+        """Why the reader stopped: ``"eof"``, ``"read_failures"``, or
+        None (still running, or stopped by :meth:`release`)."""
+        return self._end_reason
+
+    @property
+    def end_error(self) -> Optional[str]:
+        """The exception that killed the reader thread, if any."""
+        return self._end_error
+
+    @property
+    def is_live(self) -> bool:
+        """True for webcams and network streams (which never EOF — if
+        one ends, it died); False for video files."""
+        return not self._is_file_source()
+
     def read(self) -> Optional[FramePacket]:
         """Return the newest ``(frame_index, timestamp, frame)`` or None.
 
@@ -133,39 +165,73 @@ class FrameSource:
     def _reader_loop(self) -> None:
         import cv2
 
-        assert self._cap is not None
-        index = 0
-        failures = 0
-        while self._running:
-            if self._paused.is_set():
-                if not self._is_file_source():
-                    # Keep live camera/RTSP buffer drained while frozen so
-                    # resuming immediately delivers fresh frames.
-                    self._cap.grab()
-                time.sleep(0.02)
-                continue
-            tick = time.monotonic()
-            ok, frame = self._cap.read()
-            if not ok or frame is None:
-                if self.loop_file and self._rewind(cv2):
-                    continue
-                failures += 1
-                if failures >= self.max_consecutive_failures:
-                    break
-                time.sleep(0.02)
-                continue
+        # The try/finally guarantees _ended is set even if read()
+        # raises (e.g. after release() timed out joining this thread):
+        # without it the display loop would wait forever on a dead
+        # reader with _ended still False.
+        try:
+            assert self._cap is not None
+            index = 0
             failures = 0
-            index += 1
-            with self._lock:
-                self._latest = (index, time.monotonic(), frame)
-            # A file would otherwise be decoded as fast as the CPU allows;
-            # pace it to its native frame rate so playback looks like video.
-            # Live sources (webcam/RTSP) arrive at their own rate already.
-            if self.pace_file and self.source_fps > 0 and self._is_file_source():
-                remaining = (1.0 / self.source_fps) - (time.monotonic() - tick)
-                if remaining > 0:
-                    time.sleep(remaining)
-        self._ended = True
+            while self._running:
+                if self._paused.is_set():
+                    if not self._is_file_source():
+                        # Keep live camera/RTSP buffer drained while frozen so
+                        # resuming immediately delivers fresh frames.
+                        self._cap.grab()
+                    time.sleep(READER_IDLE_SLEEP_S)
+                    continue
+                tick = time.monotonic()
+                ok, frame = self._cap.read()
+                if not ok or frame is None:
+                    if self.loop_file and self._rewind(cv2):
+                        continue
+                    failures += 1
+                    if failures >= self.max_consecutive_failures:
+                        # A file that stops delivering frames at (or
+                        # just past) its last frame reached EOF; anything
+                        # else — a live source, or a file failing
+                        # mid-stream — is a read failure, not an ending.
+                        self._end_reason = (
+                            "eof"
+                            if self._is_at_eof(cv2)
+                            else "read_failures"
+                        )
+                        break
+                    time.sleep(READER_IDLE_SLEEP_S)
+                    continue
+                failures = 0
+                index += 1
+                with self._lock:
+                    self._latest = (index, time.monotonic(), frame)
+                # A file would otherwise be decoded as fast as the CPU allows;
+                # pace it to its native frame rate so playback looks like video.
+                # Live sources (webcam/RTSP) arrive at their own rate already.
+                if self.pace_file and self.source_fps > 0 and self._is_file_source():
+                    remaining = (1.0 / self.source_fps) - (time.monotonic() - tick)
+                    if remaining > 0:
+                        time.sleep(remaining)
+        except Exception as exc:
+            self._end_reason = "read_failures"
+            self._end_error = str(exc)
+        finally:
+            self._ended = True
+
+    def _is_at_eof(self, cv2_module: object) -> bool:
+        """True when a file source's read position is at its last frame.
+
+        Live sources never EOF. Anything that cannot be probed (no
+        frame count, a failed ``get``) answers False — an unprovable
+        EOF is treated as a read failure, the safer direction.
+        """
+        if not self._is_file_source() or self._cap is None:
+            return False
+        try:
+            total = float(self._cap.get(cv2_module.CAP_PROP_FRAME_COUNT) or 0)
+            pos = float(self._cap.get(cv2_module.CAP_PROP_POS_FRAMES) or 0)
+        except Exception:
+            return False
+        return total > 0 and pos >= total - 1
 
     def _rewind(self, cv2_module: object) -> bool:
         """Restart a file source at frame 0 (used when ``loop_file``)."""

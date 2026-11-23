@@ -70,7 +70,7 @@ python scripts/inference/run_weapon_demo.py --weights models/weights/best_openvi
 
 The export script self-checks the exported model and prints an approximate
 blank-frame FPS for the machine it ran on. On recent ultralytics versions,
-adding `--device intel:gpu` to the demo selects the integrated GPU
+adding `--device xpu` to the demo selects the integrated GPU
 explicitly. RTX/NVIDIA demo machines keep using the `.pt` file — no export
 needed there.
 
@@ -113,4 +113,7 @@ was a cold PyTorch run through the full demo pipeline.
   chip behind it, so text stays readable on bright frames.
   The HUD shows both rates (`FPS <display> (detect <inference>)`). The
   project's >= 25 FPS target refers to the *detection* rate and is
-  validated on the demo machine (RTX 3060 class), not on CPU.
+  validated on the demo laptop (Intel Iris Xe via OpenVINO, 39 FPS
+  inference — see the table above), not on CPU. RTX 3060 class is the
+  proposal's target hardware, not a measured machine: no RTX 3060
+  measurement exists in this project.

@@ -8,7 +8,8 @@ Owns the pipeline (``FrameSource`` -> ``WeaponDetector`` -> ``ByteTrack``
   as fast as the model allows;
 * a display thread reads frames at video rate, draws the latest
   detections on them, JPEG-encodes the result, and (optionally) records
-  the annotated video.
+  the video — raw (un-annotated) frames by default, so a gate session
+  yields minable training data, annotated on request.
 
 The FastAPI layer only ever touches this class: it starts/stops runs,
 reads the latest JPEG for the MJPEG stream, and polls ``status()``.
@@ -17,6 +18,7 @@ Inference never runs on the FastAPI event loop.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -24,13 +26,24 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.pipeline import (
+    FALLBACK_FPS,
     FrameSource,
     InferenceWorker,
     RollingFps,
     TrackClassVoter,
     WeaponDetector,
+    detect_openvino_device,
     draw_annotations,
 )
+from src.pipeline.thresholds import CONF_GUN, CONF_KNIFE, DEFAULT_CONF
+
+logger = logging.getLogger("sentinel.demo_runner")
+
+# How long teardown waits for the worker / display thread before giving
+# up (and, for the worker, dropping the cached detector).
+JOIN_TIMEOUT_S = 5.0
+# Idle sleep in the display loop while paused.
+PAUSED_POLL_SLEEP_S = 0.02
 
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
 SNAPSHOT_RE = re.compile(
@@ -45,21 +58,25 @@ class RunConfig:
     source_type: str  # "webcam" | "video"
     source: str  # webcam index ("0") or video filename inside videos_dir
     weights_id: str  # filename (.pt) or dirname (OpenVINO) inside weights_dir
-    conf_gun: float = 0.44
-    conf_knife: float = 0.43
+    conf_gun: float = CONF_GUN
+    conf_knife: float = CONF_KNIFE
     imgsz: int = 640
     min_hits: int = 3
     tracker: str = "bytetrack.yaml"
     loop: bool = False
     hide_unconfirmed: bool = False
     save_video: bool = False
+    # With save_video on, record the RAW frames by default (annotated
+    # video is useless as training data). False restores the old
+    # annotated recording.
+    record_raw: bool = True
 
 
 @dataclass
 class RunInfo:
     """What the API returns about a run (live or finished)."""
 
-    state: str  # idle | running | stopped | error
+    state: str  # idle | starting | running | paused | stopping | stopped | error
     source_label: str = ""
     weights_label: str = ""
     display_fps: float = 0.0
@@ -71,6 +88,9 @@ class RunInfo:
     started_at: float | None = None
     elapsed_s: float = 0.0
     error: str | None = None
+    # Non-fatal problem for the status line (GPU fallback, failed
+    # recording). Cleared on every start.
+    warning: str | None = None
     saved_video: str | None = None
 
 
@@ -95,12 +115,19 @@ class DemoRunner:
         self._state = "idle"
         self._config: RunConfig | None = None
         self._error: str | None = None
+        self._warning: str | None = None
         self._started_at: float | None = None
         self._stopped_at: float | None = None
         self._paused_at: float | None = None
         self._paused_total_s: float = 0.0
         self._saved_video: str | None = None
         self._snapshots_at_start = 0
+        # Set by stop() while state is "starting"; the loader checks it
+        # after each slow step so a start can be cancelled.
+        self._cancel_start = threading.Event()
+        # worker.latest() failures are logged once per run, not on
+        # every 500 ms status poll.
+        self._latest_error_logged = False
 
         # Live frame + stats, written by the display thread.
         self._latest_jpeg: bytes | None = None
@@ -135,6 +162,9 @@ class DemoRunner:
             self._state = "starting"
             self._config = config
             self._error = None
+            self._warning = None
+            self._latest_error_logged = False
+            self._cancel_start.clear()
             self._saved_video = None
             self._snapshots_at_start = len(self.list_snapshots())
             self._latest_jpeg = None
@@ -160,6 +190,7 @@ class DemoRunner:
             raise RuntimeError(
                 f"Could not load weights {config.weights_id!r}: {exc}"
             ) from exc
+        self._check_cancelled()
 
         try:
             import cv2
@@ -179,9 +210,15 @@ class DemoRunner:
             except Exception:
                 pass
             self._fail(f"Could not open source {config.source!r}: {exc}")
-            raise RuntimeError(
+            # A bad source is the caller's fault (bad file, busy
+            # webcam), not a server error — ValueError maps to 400.
+            raise ValueError(
                 f"Could not open source {config.source!r}: {exc}"
             ) from exc
+        if self._cancel_start.is_set():
+            stream.release()
+            self._fail("Run cancelled while starting.")
+            raise RuntimeError("Run cancelled while starting.")
 
         worker = InferenceWorker(
             stream,
@@ -197,8 +234,22 @@ class DemoRunner:
             self._state = "running"
             self._started_at = time.time()
             self._stopped_at = None
+        if self._cancel_start.is_set():
+            # Stop landed between the last check and the thread starts:
+            # tear down (the joins are guarded for never-started
+            # threads) instead of launching a cancelled run.
+            self._teardown()
+            self._fail("Run cancelled while starting.")
+            raise RuntimeError("Run cancelled while starting.")
         try:
             worker.start()
+            with self._lock:
+                torn_down = self._state != "running"
+            if torn_down:
+                # stop() raced start() and tore the run down while the
+                # worker was starting: do not launch a display thread
+                # for a run that is already finished.
+                return self.status()
             self._display_thread = threading.Thread(
                 target=self._display_loop, args=(cv2,), name="sentinel-display",
                 daemon=True,
@@ -208,7 +259,20 @@ class DemoRunner:
             self._teardown()
             self._fail(f"Could not start the run threads: {exc}")
             raise RuntimeError(f"Could not start the run threads: {exc}") from exc
+        logger.info(
+            "run started: source=%s (%s) weights=%s conf Gun=%.2f Knife=%.2f "
+            "imgsz=%d min_hits=%d save_video=%s record_raw=%s",
+            config.source, config.source_type, config.weights_id,
+            config.conf_gun, config.conf_knife, config.imgsz,
+            config.min_hits, config.save_video, config.record_raw,
+        )
         return self.status()
+
+    def _check_cancelled(self) -> None:
+        """Raise if stop() cancelled this start while it was loading."""
+        if self._cancel_start.is_set():
+            self._fail("Run cancelled while starting.")
+            raise RuntimeError("Run cancelled while starting.")
 
     def pause(self) -> RunInfo:
         """Pause an active run, holding the current frame and timer."""
@@ -243,26 +307,47 @@ class DemoRunner:
     def stop(self) -> RunInfo:
         """Stop the active or paused run (idempotent) and return final stats.
 
+        While a run is "starting", Stop cancels the start instead: it
+        sets the flag the loader checks, and the start fails with
+        "Run cancelled while starting." once the current slow step
+        (model load / warmup / source open) returns.
+
         ``status()`` takes ``self._lock`` itself, so it is never called
         while this method holds the lock (``threading.Lock`` is not
         re-entrant — that deadlocked the first version).
         """
         with self._lock:
+            cancelling = self._state == "starting"
+            if cancelling:
+                self._cancel_start.set()
             idle = self._state not in ("running", "paused")
-            if not idle:
+            if not idle and not cancelling:
                 if self._paused_at is not None:
                     self._paused_total_s += max(
                         0.0, time.time() - self._paused_at
                     )
                     self._paused_at = None
                 self._state = "stopping"
-        if idle:
+        if cancelling or idle:
             return self.status()
+        # Confirmed count must be read before teardown drops the worker.
+        confirmed = 0
+        if self._worker is not None:
+            try:
+                _dets, conf, _fps = self._worker.latest()
+                confirmed = len(conf)
+            except Exception:
+                pass
         self._teardown()
         with self._lock:
             self._state = "stopped"
             self._stopped_at = time.time()
-        return self.status()
+        info = self.status()
+        logger.info(
+            "run stopped: frames=%d confirmed=%d snapshots=%d elapsed=%.1fs",
+            info.frames, confirmed, info.snapshots, info.elapsed_s,
+        )
+        return info
 
     def _teardown(self) -> None:
         """Release the worker, display thread, and stream without
@@ -273,11 +358,30 @@ class DemoRunner:
         display_thread = self._display_thread
         if worker is not None:
             worker.stop()
-            worker.join(timeout=5.0)
-        if display_thread is not None and (
-            display_thread is not threading.current_thread()
+            # Guard the join: Stop racing start() can reach here while
+            # the worker thread was created but never started, and
+            # join() on a never-started thread raises RuntimeError.
+            if worker.is_alive():
+                worker.join(timeout=JOIN_TIMEOUT_S)
+                if worker.is_alive():
+                    # The old worker may still be inside
+                    # detector.track(); drop the cached detector so the
+                    # next run loads a fresh one instead of sharing a
+                    # single YOLO object (and its tracker state)
+                    # between two threads.
+                    logger.warning(
+                        "worker thread did not exit in %.1fs; dropping "
+                        "the cached detector",
+                        JOIN_TIMEOUT_S,
+                    )
+                    self._cached_detector = None
+                    self._cached_detector_key = None
+        if (
+            display_thread is not None
+            and display_thread is not threading.current_thread()
+            and display_thread.is_alive()
         ):
-            display_thread.join(timeout=5.0)
+            display_thread.join(timeout=JOIN_TIMEOUT_S)
         if stream is not None:
             stream.release()
         with self._lock:
@@ -295,13 +399,14 @@ class DemoRunner:
             paused_at = self._paused_at
             paused_total_s = self._paused_total_s
             error = self._error
+            warning = self._warning
             saved_video = self._saved_video
             frames = self._frames_shown
             display_fps = self._display_fps
             worker = self._worker
         return self._build_status(
             state, config, started, stopped, paused_at, paused_total_s,
-            error, saved_video, frames, display_fps, worker,
+            error, warning, saved_video, frames, display_fps, worker,
         )
 
     def _build_status(
@@ -313,6 +418,7 @@ class DemoRunner:
         paused_at: float | None,
         paused_total_s: float,
         error: str | None,
+        warning: str | None,
         saved_video: str | None,
         frames: int,
         display_fps: float,
@@ -330,7 +436,12 @@ class DemoRunner:
                 dets, conf, detect_fps = worker.latest()
                 detections, confirmed = len(dets), len(conf)
             except Exception:
-                pass
+                # Log once per run, not on every 500 ms poll.
+                if not self._latest_error_logged:
+                    self._latest_error_logged = True
+                    logger.warning(
+                        "status: worker.latest() failed", exc_info=True
+                    )
         if started is not None:
             if paused_at is not None:
                 end = paused_at
@@ -354,6 +465,7 @@ class DemoRunner:
             started_at=started,
             elapsed_s=elapsed,
             error=error,
+            warning=warning,
             saved_video=saved_video,
         )
 
@@ -373,10 +485,14 @@ class DemoRunner:
         for path in sorted(self.videos_dir.rglob("*")):
             if not path.is_file() or path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
+            try:
+                size_mb = round(path.stat().st_size / 1_000_000, 1)
+            except FileNotFoundError:
+                continue  # deleted between the scan and the stat
             videos.append(
                 {
                     "name": path.relative_to(self.videos_dir).as_posix(),
-                    "size_mb": round(path.stat().st_size / 1_000_000, 1),
+                    "size_mb": size_mb,
                     "duration_s": self._probe_duration(path),
                 }
             )
@@ -387,7 +503,13 @@ class DemoRunner:
 
         Raises ``ValueError`` for invalid paths or non-uploaded files,
         ``RuntimeError`` if the video is in use by an active/paused run,
-        and ``FileNotFoundError`` if the file does not exist.
+        ``FileNotFoundError`` if the file does not exist, and
+        ``OSError`` if the delete itself fails (e.g. the file is open
+        on Windows — the API maps that to 409).
+
+        The in-use check, the existence check, and the unlink all run
+        under the lock, so a start() racing the delete cannot open the
+        file first.
         """
         if not name or "\\" in name or name.startswith("/"):
             raise ValueError(f"Invalid video name: {name!r}")
@@ -413,9 +535,9 @@ class DemoRunner:
                     raise RuntimeError(
                         "Cannot delete a video while it is used by an active run."
                     )
-        if not target.is_file():
-            raise FileNotFoundError(f"Uploaded video not found: {name!r}")
-        target.unlink()
+            if not target.is_file():
+                raise FileNotFoundError(f"Uploaded video not found: {name!r}")
+            target.unlink()
         return target.relative_to(self.videos_dir.resolve()).as_posix()
 
     def list_weights(self) -> list[dict]:
@@ -442,12 +564,17 @@ class DemoRunner:
         """Snapshots, newest first (parsed from the worker's filenames)."""
         if not self.snapshots_dir.is_dir():
             return []
+        # Stat each file defensively: a concurrent clear_snapshots()
+        # can delete one between the glob and the stat, and that must
+        # not 500 the 500 ms status poll.
+        entries: list[tuple[float, Path]] = []
+        for path in self.snapshots_dir.glob("threat_*.jpg"):
+            try:
+                entries.append((path.stat().st_mtime, path))
+            except FileNotFoundError:
+                continue
         out = []
-        for path in sorted(
-            self.snapshots_dir.glob("threat_*.jpg"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        ):
+        for _mtime, path in sorted(entries, reverse=True):
             m = SNAPSHOT_RE.match(path.name)
             if not m:
                 continue
@@ -477,19 +604,13 @@ class DemoRunner:
 
     @staticmethod
     def _detect_openvino_device(weights_path: Path) -> str | None:
-        """Select ``intel:gpu`` for OpenVINO folders when an Intel GPU is
-        available, leaving PyTorch (.pt) and CPU-only machines untouched."""
-        if not weights_path.is_dir():
-            return None
-        try:
-            import openvino as ov
+        """Select ``"xpu"`` for OpenVINO folders when an Intel GPU is
+        available, leaving PyTorch (.pt) and CPU-only machines untouched.
 
-            devices = ov.Core().available_devices
-            if any(d.startswith("GPU") for d in devices):
-                return "intel:gpu"
-        except Exception:
-            pass
-        return None
+        Delegates to :func:`src.pipeline.detect_openvino_device`, the
+        helper shared with the CLI demo.
+        """
+        return detect_openvino_device(weights_path)
 
     def _get_or_load_detector(
         self, weights_path: Path, config: RunConfig
@@ -505,7 +626,7 @@ class DemoRunner:
             and self._cached_detector_key == key
         ):
             self._cached_detector.update_thresholds(
-                conf_threshold=0.40,
+                conf_threshold=DEFAULT_CONF,
                 conf_thresholds={
                     "Gun": config.conf_gun,
                     "Knife": config.conf_knife,
@@ -525,7 +646,7 @@ class DemoRunner:
         try:
             detector = WeaponDetector(
                 weights_path,
-                conf_threshold=0.40,
+                conf_threshold=DEFAULT_CONF,
                 conf_thresholds={
                     "Gun": config.conf_gun,
                     "Knife": config.conf_knife,
@@ -534,15 +655,22 @@ class DemoRunner:
                 device=device,
             )
             detector.warmup(tracker=config.tracker)
-        except Exception:
-            if device != "intel:gpu":
+        except Exception as exc:
+            if device != "xpu":
                 raise
-            # Fallback cleanly to auto/CPU if Intel GPU compilation fails.
+            # Fall back to auto/CPU if Intel GPU compilation fails —
+            # but say so loudly: a silent fallback runs the jury demo
+            # at CPU speed with no indication anywhere.
+            warning = f"Intel GPU compile failed ({exc}); running on CPU"
+            with self._lock:
+                self._warning = warning
+            print(f"WARNING: {warning}")
+            logger.warning(warning)
             device = None
             key = (weights_path.resolve(), config.imgsz, device)
             detector = WeaponDetector(
                 weights_path,
-                conf_threshold=0.40,
+                conf_threshold=DEFAULT_CONF,
                 conf_thresholds={
                     "Gun": config.conf_gun,
                     "Knife": config.conf_knife,
@@ -557,9 +685,20 @@ class DemoRunner:
         return detector
 
     def _resolve_weights(self, weights_id: str) -> Path:
-        if not weights_id or "/" in weights_id or "\\" in weights_id:
+        if (
+            not weights_id
+            or weights_id in (".", "..")
+            or "/" in weights_id
+            or "\\" in weights_id
+        ):
             raise ValueError(f"Unknown weights: {weights_id!r}")
-        path = self.weights_dir / weights_id
+        # The resolved path must sit directly inside weights_dir:
+        # that rejects "." / ".." (already filtered above) and any
+        # symlink inside the dir that points elsewhere.
+        weights_root = self.weights_dir.resolve()
+        path = (self.weights_dir / weights_id).resolve()
+        if path.parent != weights_root:
+            raise ValueError(f"Unknown weights: {weights_id!r}")
         if not path.exists():
             known = [w["id"] for w in self.list_weights()]
             raise ValueError(
@@ -571,11 +710,17 @@ class DemoRunner:
     def _resolve_source(self, config: RunConfig) -> int | str:
         if config.source_type == "webcam":
             try:
-                return int(config.source)
+                index = int(config.source)
             except ValueError as exc:
                 raise ValueError(
                     f"Webcam source must be a camera index, got {config.source!r}"
                 ) from exc
+            if index < 0:
+                raise ValueError(
+                    "Webcam source must be a camera index >= 0, "
+                    f"got {config.source!r}"
+                )
+            return index
         if config.source_type != "video":
             raise ValueError(
                 f"source_type must be 'webcam' or 'video', got {config.source_type!r}"
@@ -604,6 +749,8 @@ class DemoRunner:
             self._state = "error"
             self._error = message
             self._stopped_at = time.time()
+            frames = self._frames_shown
+        logger.error("run failed: %s (frames=%d)", message, frames)
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
@@ -626,18 +773,36 @@ class DemoRunner:
         """Mirror of the CLI demo's display loop: newest frame + latest
         detections -> annotated JPEG, at video rate."""
         config = self._config
-        assert config is not None
         stream = self._stream
         worker = self._worker
-        assert stream is not None and worker is not None
+        # Explicit failure instead of asserts before the try: an assert
+        # firing here used to skip the finally below and wedge the run
+        # in "running" forever. (If the run already finished — a stop()
+        # raced start() and tore it down before this thread got going —
+        # just exit quietly instead of failing a finished run.)
+        if config is None or stream is None or worker is None:
+            with self._lock:
+                finished = self._state in ("stopped", "error", "idle")
+            if not finished:
+                self._fail("Display loop started without a run configured.")
+                self._teardown()
+            return
+        me = threading.current_thread()
         fps_counter = RollingFps()
         last_index = 0
         writer = None
         saved_video_path: str | None = None
+        recording_failed = False
         try:
             while not self._stop_event.is_set():
+                # Check FIRST, every iteration: the worker can die while
+                # frames keep flowing, and the old check (in the
+                # no-new-frame branch below) then never ran — verdicts
+                # froze while the UI stayed "Running".
+                if worker.error is not None:
+                    break
                 if self.state == "paused":
-                    time.sleep(0.02)
+                    time.sleep(PAUSED_POLL_SLEEP_S)
                     continue
                 packet = stream.read()
                 if packet is None or packet[0] == last_index:
@@ -656,26 +821,44 @@ class DemoRunner:
                     cv2_module, frame, detections, confirmed,
                     hide_unconfirmed=config.hide_unconfirmed,
                 )
-                if config.save_video and self.save_video_dir is not None:
+                if (
+                    config.save_video
+                    and self.save_video_dir is not None
+                    and not recording_failed
+                ):
                     if writer is None:
                         self.save_video_dir.mkdir(parents=True, exist_ok=True)
                         stamp = time.strftime("%Y%m%d_%H%M%S")
+                        suffix = "_raw" if config.record_raw else ""
                         saved_video_path = str(
-                            self.save_video_dir / f"demo_{stamp}.mp4"
+                            self.save_video_dir / f"demo_{stamp}{suffix}.mp4"
                         )
                         height, width = display.shape[:2]
                         writer = cv2_module.VideoWriter(
                             saved_video_path,
                             cv2_module.VideoWriter_fourcc(*"mp4v"),
-                            stream.source_fps or 25.0,
+                            stream.source_fps or FALLBACK_FPS,
                             (width, height),
                         )
                         if not writer.isOpened():
                             writer.release()
                             writer = None
+                            failed_path = saved_video_path
                             saved_video_path = None
+                            recording_failed = True
+                            warning = (
+                                "Could not open video recording "
+                                f"{failed_path!r}; recording disabled"
+                            )
+                            with self._lock:
+                                self._warning = warning
+                            print(f"WARNING: {warning}")
+                            logger.warning(warning)
                     if writer is not None:
-                        writer.write(display)
+                        # Raw frames by default (record_raw): the
+                        # annotated recording is useless as training
+                        # data for the next model version.
+                        writer.write(frame if config.record_raw else display)
                 ok, buf = cv2_module.imencode(
                     ".jpg", display, [cv2_module.IMWRITE_JPEG_QUALITY, 85]
                 )
@@ -691,14 +874,32 @@ class DemoRunner:
             with self._lock:
                 if saved_video_path is not None:
                     self._saved_video = saved_video_path
-            # The video ended (or inference failed) while the run was
-            # still marked running: finish it cleanly instead of
-            # leaving the UI stuck on "Running".
+            # Only the CURRENT display thread finishes the run: a stale
+            # thread that outlived its teardown join must not fail a
+            # newer run that reused the runner.
             with self._lock:
+                current = self._display_thread is me
                 still_running = self._state in ("running", "paused")
-            if still_running:
+            # The video ended (or inference failed, or the source died)
+            # while the run was still marked running: finish it instead
+            # of leaving the UI stuck on "Running".
+            if current and still_running:
                 if worker.error is not None:
                     self._fail(f"Inference failed: {worker.error}")
+                    self._teardown()
+                elif stream.ended and (stream.is_live or last_index == 0):
+                    # A live source only "ends" by dying, and a file that
+                    # produced zero frames never played: neither is a
+                    # clean stop. Surface the end reason in the error so
+                    # the UI shows why the run ended.
+                    reason = (
+                        "Camera disconnected"
+                        if stream.is_live
+                        else "Could not read video"
+                    )
+                    if stream.end_reason:
+                        reason += f" ({stream.end_reason})"
+                    self._fail(reason)
                     self._teardown()
                 else:
                     self.stop()

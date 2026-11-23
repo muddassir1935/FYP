@@ -140,6 +140,15 @@ async function loadWeights() {
   els.btnStart.disabled = weights.length === 0;
 }
 
+async function loadDefaults() {
+  // The operating point comes from the backend (the single source of
+  // truth in src/pipeline/thresholds.py) — the inputs start empty
+  // until it arrives, so the UI can never disagree with the server.
+  const d = await api("/api/defaults");
+  $("conf-gun").value = d.conf_gun;
+  $("conf-knife").value = d.conf_knife;
+}
+
 async function loadSnapshots() {
   const snaps = await api("/api/snapshots");
   els.snapshotsGrid.innerHTML = "";
@@ -204,7 +213,10 @@ function setRunningUI(running, starting = false, paused = false) {
   const active = running || paused;
   const busy = active || starting;
   els.btnStart.disabled = busy || els.weightsSelect.disabled || state.serverDown;
-  els.btnStop.disabled = !active || state.serverDown;
+  // Stop stays enabled while starting: it cancels the start (the
+  // backend checks the flag after each slow load step). Before, a hung
+  // model load left the UI stuck on "Starting" with no cancel.
+  els.btnStop.disabled = !(active || starting) || state.serverDown;
   els.btnPause.disabled = !active || state.serverDown;
   els.btnPause.textContent = paused ? "Resume" : "Pause";
   for (const el of els.runForm.querySelectorAll("input, select")) {
@@ -237,6 +249,19 @@ function detachStream() {
   els.stream.removeAttribute("src");
   els.placeholder.hidden = false;
 }
+
+// A failed MJPEG attach (or a dropped connection mid-run) used to
+// leave a dead video area under a "Running" pill with no retry: the
+// stream was marked attached unconditionally and never re-attached.
+// On error, drop the attachment and show a retrying note; the next
+// status poll re-attaches while the run is still active.
+els.stream.addEventListener("error", () => {
+  if (!state.running && !state.paused) return;
+  state.streamAttached = false;
+  els.stream.hidden = true;
+  setPlaceholderText("Stream interrupted", "Retrying…");
+  els.placeholder.hidden = false;
+});
 
 function applyStatus(s) {
   // Ignore stale pre-start polls while our own Start request is in flight.
@@ -311,6 +336,12 @@ function applyStatus(s) {
   els.statConfirmed.textContent = s.confirmed;
   els.statSnapshots.textContent = s.snapshots;
 
+  // Non-fatal problems (Intel GPU fallback, failed recording) ride on
+  // the status line until the next run clears them.
+  if (s.warning) {
+    els.runStatusLine.textContent = `Warning: ${s.warning}`;
+  }
+
   const alerting = s.state === "running" && s.confirmed > 0;
   if (alerting) {
     state.lastAlertAt = Date.now();
@@ -345,6 +376,17 @@ async function pollStatus() {
   }
 }
 
+let pollTimer = null;
+
+function schedulePoll() {
+  // Chain with setTimeout instead of setInterval: a slow status
+  // response must not overlap the next poll and apply out of order.
+  pollTimer = setTimeout(async () => {
+    await pollStatus();
+    if (!state.serverDown) schedulePoll();
+  }, 500);
+}
+
 els.runForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   ensureAudio();
@@ -361,6 +403,7 @@ els.runForm.addEventListener("submit", async (event) => {
     loop: $("opt-loop").checked,
     hide_unconfirmed: $("opt-hide").checked,
     save_video: $("opt-save").checked,
+    record_raw: $("opt-raw").checked,
   };
   state.starting = true;
   applyStatus({
@@ -418,15 +461,13 @@ els.btnStop.addEventListener("click", async () => {
 
 // --- server shutdown ----------------------------------------------------
 
-let pollTimer = null;
-
 els.btnShutdown.addEventListener("click", async () => {
   if (!window.confirm("Stop the demo server? The console will stop responding. Start it again from the terminal when you need it.")) return;
   els.btnShutdown.disabled = true;
   try {
     await api("/api/server/shutdown", { method: "POST" });
     state.serverDown = true;
-    if (pollTimer !== null) clearInterval(pollTimer);
+    if (pollTimer !== null) clearTimeout(pollTimer);
     setRunningUI(false);
     els.btnShutdown.disabled = true;
     els.backendBanner.textContent = "Server stopped — start it again from the terminal to demo again.";
@@ -529,7 +570,7 @@ document.addEventListener("fullscreenchange", () => {
 
 (async function init() {
   try {
-    await Promise.all([loadSources(), loadWeights(), loadSnapshots()]);
+    await Promise.all([loadSources(), loadWeights(), loadSnapshots(), loadDefaults()]);
     const s = await api("/api/run/status");
     state.lastSnapshotCount = s.snapshots;
     // applyStatus attaches the stream when the state is running, so a
@@ -539,7 +580,7 @@ document.addEventListener("fullscreenchange", () => {
     showError(`Could not reach the backend: ${err.message}`);
     els.backendBanner.hidden = false;
   }
-  pollTimer = setInterval(pollStatus, 500);
+  schedulePoll();
   // Snapshots can also appear without a status change (older runs); refresh rarely.
   setInterval(() => { if (!state.running) loadSnapshots().catch(() => {}); }, 10000);
 })();

@@ -7,6 +7,14 @@ best checkpoint on the held-out test split, and writes a ``run_summary.json``
 into the run directory (config + validation/test metrics + weights SHA-256)
 so every run can be recorded in the repo's run log.
 
+The summary is the reproducibility record: besides the hyperparameters it
+logs the device/workers, seed + determinism, the ultralytics/torch/Python
+versions, the repo commit (``--code-revision``), and the dataset identity
+(slug + manifest SHA-256) — everything needed to re-create the run. It also
+records the best-epoch validation metrics (from ``results.csv``) alongside
+the final-epoch ones, and the best-mAP50 epoch vs the best-fitness epoch,
+because ``best.pt`` is picked by mAP50-95 while the adoption gate uses mAP50.
+
 Usage:
     python scripts/training/train_weapon_detector.py --data <dataset.yaml> \
         --epochs 50 --imgsz 640 --batch 16 \
@@ -19,8 +27,11 @@ parsing also work on machines without torch/ultralytics installed.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
+import math
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +53,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=20,
                         help="Early-stopping patience in epochs.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Deterministic training (Ultralytics default is "
+                             "True; passed explicitly so the run record shows "
+                             "it). Use --no-deterministic to disable.")
+    parser.add_argument("--code-revision", default="",
+                        help="Git SHA of the repo the training script ran "
+                             "from (the Kaggle notebook passes `git rev-parse "
+                             "HEAD`); recorded in the summary.")
+    parser.add_argument("--dataset-slug", default="",
+                        help="Kaggle dataset slug (e.g. sentinel-weapon-v5); "
+                             "recorded in the summary.")
+    parser.add_argument("--dataset-version", default="",
+                        help="Kaggle dataset version, when known; recorded "
+                             "in the summary.")
+    parser.add_argument("--exist-ok", action="store_true", default=False,
+                        help="Allow overwriting an existing run directory. "
+                             "Default False: Ultralytics auto-increments the "
+                             "run name, so a re-run cannot silently overwrite "
+                             "a previous run's results.csv / best.pt.")
     # Fine-tune / augmentation hyperparameters (YOLOv8 defaults, so a plain
     # run behaves exactly as before). The v2.1 fine-tune passes lower lr0,
     # rotation + perspective, and close_mosaic via these flags.
@@ -105,7 +136,11 @@ def metric_block(metrics: Any, names: dict) -> dict[str, Any]:
         for i, cls_idx in enumerate(box.ap_class_index):
             name = names.get(int(cls_idx), str(cls_idx))
             per_class[str(name)] = {"AP50": round(float(ap50[i]), 4)}
-    except Exception:
+    except Exception as exc:
+        # NICE-1: never silently drop per-class metrics — if a future
+        # Ultralytics version changes box.ap50 / ap_class_index, say so.
+        print(f"WARNING: per-class metrics failed ({exc}); "
+              "per_class omitted from the summary.", file=sys.stderr)
         per_class = {}
     if per_class:
         out["per_class"] = per_class
@@ -117,9 +152,10 @@ def resolve_train_output(results: Any, run_dir: Path) -> tuple[Path, dict[str, f
 
     Ultralytics changed ``model.train()``'s return type across versions:
     older releases return the trainer (with ``.save_dir`` / ``.results_dict``),
-    newer ones return a plain metrics dict. The run dir is deterministic
-    (``project/name``, and the script always passes ``exist_ok=True``), so it
-    never depends on the return type.
+    newer ones return a plain metrics dict. With the trainer the true save
+    dir comes from ``.save_dir`` (which matters now that ``exist_ok`` defaults
+    to False and Ultralytics may auto-increment the run name); with a plain
+    dict the run dir is the ``project/name`` fallback.
     """
     if isinstance(results, dict):
         raw_metrics: dict = results
@@ -132,13 +168,129 @@ def resolve_train_output(results: Any, run_dir: Path) -> tuple[Path, dict[str, f
         try:
             train_results[str(key)] = round(float(value), 4)
         except (TypeError, ValueError):
+            # NICE-9: log dropped non-numeric metrics instead of silently
+            # losing them — a future Ultralytics version may return a
+            # non-numeric value for a metric.
+            print(f"[debug] resolve_train_output: dropped non-numeric "
+                  f"metric {key!r}={value!r}")
             continue
     return save_dir, train_results
+
+
+def analyze_results_csv(results_csv: Path) -> dict[str, Any]:
+    """Best-epoch analysis from ``results.csv`` (SHOULD-2 / SHOULD-3).
+
+    Ultralytics picks ``best.pt`` by fitness, and in 8.4.215 fitness *is*
+    mAP50-95 (``DetMetrics.fitness`` weights ``[0, 0, 0, 1]``) — while the
+    adoption gate uses mAP50. This records both best epochs, the mAP50 gap
+    between them, and the best-epoch (max-fitness) validation metrics, so a
+    run where the two criteria disagree is visible in the summary instead
+    of silently adopting a checkpoint that is not best on the gated metric.
+
+    Returns ``{}`` when the file is missing or has no usable metric rows —
+    a degraded record is better than a crashed run.
+    """
+    if not results_csv.exists():
+        return {}
+    map50_col = "metrics/mAP50(B)"
+    map5095_col = "metrics/mAP50-95(B)"
+    rows: list[dict[str, float]] = []
+    try:
+        with results_csv.open(newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                return {}
+            if map50_col not in reader.fieldnames or map5095_col not in reader.fieldnames:
+                return {}
+            for raw in reader:
+                try:
+                    row = {
+                        "epoch": int(float(raw["epoch"])),
+                        "precision": float(raw.get("metrics/precision(B)", "nan")),
+                        "recall": float(raw.get("metrics/recall(B)", "nan")),
+                        "mAP50": float(raw[map50_col]),
+                        "mAP50_95": float(raw[map5095_col]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+                if math.isnan(row["mAP50"]) or math.isnan(row["mAP50_95"]):
+                    continue
+                rows.append(row)
+    except OSError:
+        return {}
+    if not rows:
+        return {}
+    best_fitness = max(rows, key=lambda r: r["mAP50_95"])
+    best_map50 = max(rows, key=lambda r: r["mAP50"])
+    best_metrics: dict[str, Any] = {"epoch": best_fitness["epoch"]}
+    for key in ("precision", "recall", "mAP50", "mAP50_95"):
+        value = best_fitness[key]
+        if not math.isnan(value):
+            best_metrics[key] = round(value, 4)
+    best_metrics["fitness"] = round(best_fitness["mAP50_95"], 4)
+    return {
+        "best_fitness_epoch": best_fitness["epoch"],
+        "best_map50_epoch": best_map50["epoch"],
+        "map50_gap": round(best_map50["mAP50"] - best_fitness["mAP50"], 4),
+        "fitness_definition": "mAP50-95 (ultralytics 8.4.215 fitness weights [0,0,0,1])",
+        "best_val_metrics": best_metrics,
+    }
+
+
+def dataset_manifest_info(data_yaml: Path) -> dict[str, Any]:
+    """Identity of the dataset behind ``data_yaml`` (MUST-12).
+
+    The assembly manifest (``manifest.json``) sits next to the data YAML in
+    the dataset root. Its SHA-256 pins exactly which dataset a run trained
+    on — the Kaggle path in ``config["data"]`` is ephemeral and says
+    nothing about the dataset's contents. Returns ``{}`` when no manifest
+    is found (e.g. a local smoke run on a hand-written YAML).
+    """
+    manifest = data_yaml.parent / "manifest.json"
+    if not manifest.exists():
+        return {}
+    info: dict[str, Any] = {"dataset_manifest_sha256": sha256_of(manifest)}
+    try:
+        parsed = json.loads(manifest.read_text())
+    except (OSError, ValueError):
+        return info
+    if isinstance(parsed, dict):
+        if parsed.get("review_status") is not None:
+            info["dataset_manifest_review_status"] = parsed["review_status"]
+        audit = parsed.get("audit")
+        if isinstance(audit, dict) and audit.get("verdict") is not None:
+            info["dataset_manifest_audit_verdict"] = audit["verdict"]
+    return info
+
+
+def load_resumed_config(save_dir: Path) -> dict[str, Any] | None:
+    """Config of the run being resumed, from its ``args.yaml`` (SHOULD-5).
+
+    On ``--resume`` Ultralytics restores the original run's arguments and
+    ignores every CLI flag, so the summary must not describe the resume
+    invocation's flags as the run's config. Returns ``None`` when the file
+    is missing, unparseable, or PyYAML is unavailable — the caller then
+    omits the hyperparameters and notes the run as resumed.
+    """
+    args_yaml = save_dir / "args.yaml"
+    if not args_yaml.exists():
+        return None
+    try:
+        import yaml  # PyYAML ships with ultralytics; absent on a bare box
+    except ImportError:
+        return None
+    try:
+        parsed = yaml.safe_load(args_yaml.read_text())
+    except Exception:  # corrupt args.yaml: fall back to "resumed, config omitted"
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     from ultralytics import YOLO  # lazy: keeps --help torch-free
+    import torch
+    import ultralytics
 
     data_yaml = str(Path(args.data).resolve())
     run_dir = Path(args.project) / args.name
@@ -148,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
         if not last.exists():
             print(f"Resume requested but {last} not found.")
             return 1
+        # SHOULD-5: Ultralytics restores the original run's arguments from
+        # last.pt and ignores every CLI flag on the resume invocation.
+        print("WARNING: --resume ignores all CLI hyperparameter flags "
+              "(epochs, lr0, batch, ...); the original run's args.yaml "
+              "governs. The summary config is loaded from the resumed "
+              "run's args.yaml, not from these flags.", file=sys.stderr)
         model = YOLO(str(last))
         results = model.train(resume=True)
     else:
@@ -161,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             patience=args.patience,
             seed=args.seed,
+            deterministic=args.deterministic,
             lr0=args.lr0,
             lrf=args.lrf,
             warmup_epochs=args.warmup_epochs,
@@ -181,42 +340,69 @@ def main(argv: list[str] | None = None) -> int:
             close_mosaic=args.close_mosaic,
             project=args.project,
             name=args.name,
-            exist_ok=True,
+            exist_ok=args.exist_ok,
         )
 
     save_dir, train_results = resolve_train_output(results, run_dir)
     best = save_dir / "weights" / "best.pt"
 
+    # Reproducibility record (MUST-12, SHOULD-1): library versions, code
+    # revision, dataset identity, device/workers, seed + determinism —
+    # everything needed to re-create the run, none of which the v3/v4
+    # summaries recorded.
+    config: dict[str, Any] = {
+        "data": data_yaml,
+        "device": args.device,
+        "workers": args.workers,
+        "deterministic": args.deterministic,
+        "seed": args.seed,
+        "code_revision": args.code_revision or None,
+        "dataset_slug": args.dataset_slug or None,
+        "dataset_version": args.dataset_version or None,
+        "ultralytics_version": ultralytics.__version__,
+        "torch_version": torch.__version__,
+        "torch_cuda_version": getattr(torch.version, "cuda", None),
+        "python_version": sys.version.split()[0],
+    }
+    config.update(dataset_manifest_info(Path(args.data)))
+    hyperparams = ("model", "epochs", "imgsz", "batch", "patience",
+                   "lr0", "lrf", "warmup_epochs", "degrees", "translate",
+                   "scale", "shear", "perspective", "flipud", "fliplr",
+                   "mosaic", "mixup", "copy_paste", "erasing", "hsv_h",
+                   "hsv_s", "hsv_v", "close_mosaic")
+    if args.resume:
+        # SHOULD-5: the resumed run's real config comes from its args.yaml,
+        # not from the (ignored) CLI flags of this invocation.
+        resumed = load_resumed_config(save_dir)
+        config["resumed"] = True
+        if resumed is not None:
+            config["resumed_config_source"] = "args.yaml"
+            # Seed/determinism/device/workers are also restored from the
+            # original run, not from this invocation's (ignored) flags.
+            for key in hyperparams + ("device", "workers", "deterministic",
+                                      "seed"):
+                if key in resumed:
+                    config[key] = resumed[key]
+        else:
+            config["resumed_config_source"] = (
+                "unavailable — args.yaml missing; hyperparameters omitted, "
+                "CLI flags were ignored on resume")
+    else:
+        for key in hyperparams:
+            config[key] = getattr(args, key)
+
+    # SHOULD-2 / SHOULD-3: best-epoch metrics from results.csv.
+    epoch_analysis = analyze_results_csv(save_dir / "results.csv")
     summary: dict[str, Any] = {
         "run_name": args.name,
-        "config": {
-            "data": data_yaml,
-            "model": args.model,
-            "epochs": args.epochs,
-            "imgsz": args.imgsz,
-            "batch": args.batch,
-            "patience": args.patience,
-            "seed": args.seed,
-            "lr0": args.lr0,
-            "lrf": args.lrf,
-            "warmup_epochs": args.warmup_epochs,
-            "degrees": args.degrees,
-            "translate": args.translate,
-            "scale": args.scale,
-            "shear": args.shear,
-            "perspective": args.perspective,
-            "flipud": args.flipud,
-            "fliplr": args.fliplr,
-            "mosaic": args.mosaic,
-            "mixup": args.mixup,
-            "copy_paste": args.copy_paste,
-            "erasing": args.erasing,
-            "hsv_h": args.hsv_h,
-            "hsv_s": args.hsv_s,
-            "hsv_v": args.hsv_v,
-            "close_mosaic": args.close_mosaic,
-        },
-        "train_val_metrics": train_results,
+        "config": config,
+        # Final-epoch metrics, relabelled: these are the LAST epoch's
+        # validation numbers, not the adopted checkpoint's — see
+        # best_val_metrics for the checkpoint best.pt came from.
+        "train_val_metrics_final_epoch": train_results,
+        "best_val_metrics": epoch_analysis.get("best_val_metrics", {}),
+        "best_epoch_metrics": {k: v for k, v in epoch_analysis.items()
+                               if k != "best_val_metrics"},
         "test_metrics": {},
         "weights": {},
     }
@@ -232,6 +418,13 @@ def main(argv: list[str] | None = None) -> int:
             "size_mb": round(best.stat().st_size / 1e6, 2),
             "sha256": sha256_of(best),
         }
+    else:
+        # SHOULD-4: a run with no best.pt is a failed run, not a
+        # successful run with empty metrics — exit non-zero and write no
+        # summary that could be mistaken for a valid record.
+        print(f"ERROR: best.pt missing at {best} — training did not "
+              "produce a checkpoint; no summary written.", file=sys.stderr)
+        return 1
 
     summary_path = save_dir / "run_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
@@ -239,6 +432,8 @@ def main(argv: list[str] | None = None) -> int:
     print("\n================ SENTINEL RUN SUMMARY ================")
     print(f"Run dir      : {save_dir}")
     print(f"Test metrics : {json.dumps(summary['test_metrics'])}")
+    if summary["best_epoch_metrics"]:
+        print(f"Best epochs  : {json.dumps(summary['best_epoch_metrics'])}")
     print(f"Weights      : {json.dumps(summary['weights'])}")
     print(f"SUMMARY_JSON : {summary_path}")
     print("======================================================")

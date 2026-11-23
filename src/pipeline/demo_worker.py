@@ -19,6 +19,8 @@ from .track_voting import TrackClassVoter, TrackedDetection
 from .weapon_detector import Detection, WeaponDetector
 
 SNAPSHOT_COOLDOWN_SECONDS = 5.0
+# Idle sleep while paused.
+PAUSED_SLEEP_S = 0.02
 
 
 class InferenceWorker(threading.Thread):
@@ -78,11 +80,16 @@ class InferenceWorker(threading.Thread):
         with self._lock:
             return self._detections, self._confirmed, self._fps
 
+    def _set_error(self, message: str) -> None:
+        """Record a fatal worker error (under the lock, like _fps)."""
+        with self._lock:
+            self.error = message
+
     def run(self) -> None:
         last_index = 0
         while not self._stop_event.is_set():
             if self._paused_event.is_set():
-                time.sleep(0.02)
+                time.sleep(PAUSED_SLEEP_S)
                 continue
             if self._reset_requested.is_set():
                 self._reset_requested.clear()
@@ -102,7 +109,8 @@ class InferenceWorker(threading.Thread):
                 time.sleep(0.002)
                 continue
             tick = time.monotonic()
-            self._fps = self._fps_counter.tick(tick)
+            with self._lock:
+                self._fps = self._fps_counter.tick(tick)
             last_index = frame_index
 
             try:
@@ -110,7 +118,7 @@ class InferenceWorker(threading.Thread):
                     self._detector.track(frame, tracker=self._tracker)
                 )
             except Exception as exc:  # fail loudly instead of freezing silently
-                self.error = str(exc)
+                self._set_error(str(exc))
                 print(f"Inference error, stopping detection: {exc}")
                 break
             detections = [t.detection for t in tracked]
@@ -118,7 +126,15 @@ class InferenceWorker(threading.Thread):
             with self._lock:
                 self._detections = detections
                 self._confirmed = confirmed
-            self._save_snapshots(frame, detections, confirmed)
+            # Snapshot saving is inside the worker's error handling too:
+            # it used to sit after the try, so an exception here killed
+            # the thread without setting self.error — a silent freeze.
+            try:
+                self._save_snapshots(frame, detections, confirmed)
+            except Exception as exc:
+                self._set_error(f"Snapshot save failed: {exc}")
+                print(f"Snapshot error, stopping detection: {exc}")
+                break
 
     def _save_snapshots(
         self,
@@ -139,13 +155,21 @@ class InferenceWorker(threading.Thread):
             return
         annotated = draw_annotations(self._cv2, frame, detections, confirmed)
         for cd in fresh:
-            self._last_snapshot_at[cd.track_id] = now
             stamp = time.strftime("%Y%m%d_%H%M%S")
             path = (
                 self._snapshots_dir
                 / f"threat_{cd.detection.class_name}_{stamp}_t{cd.track_id}.jpg"
             )
-            self._cv2.imwrite(str(path), annotated)
+            # Check the write: a failed save (full disk, deleted dir)
+            # must not consume the cooldown or print a success line.
+            if not self._cv2.imwrite(str(path), annotated):
+                print(
+                    f"WARNING: could not save snapshot {path} "
+                    "(disk full or snapshots dir gone?) — will retry "
+                    "on the next confirmed frame."
+                )
+                continue
+            self._last_snapshot_at[cd.track_id] = now
             print(
                 f"[ALERT] {cd.detection.class_name} confirmed "
                 f"(track {cd.track_id}, {cd.hits} frames, "

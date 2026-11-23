@@ -111,3 +111,62 @@ This provides robustness against CCTV sensor noise, perspective compression, and
 * **Zero NaN/Inf Anomalies**: All 3,579 `.npy` files verified with $100\%$ finite float values.
 * **Format & Serialization**: Standardized `(30, 51)` float32 arrays saved as `seq_*.npy` (base), `seq_*_flipped.npy` (mirrored), and `seq_*_jitter.npy` (perturbed).
 
+---
+
+## [Entry 2026-11-19] Dataset v2 — quality sweep + retrain (train 21,809)
+
+* **What:** overnight quality sweep of all 19,197 new weapon images
+  (drawings, mislabels, broken boxes removed); v2 train 21,809, val
+  1,351 / test 680 frozen. 100-epoch full retrain on Kaggle (2x T4),
+  Knife 2x oversampling (1,889 knife images → 23,698 effective
+  exposures). Frozen test mAP50 0.8621; honest cleaned-test 0.8264.
+* **Detail:** `V3_ASSEMBLY_REPORT.md` (v3 report, §"Why v3 exists" +
+  class-balance section), `docs/training_run_log.md` #3.
+  The v2 assembly's "0 leakage" verdict covered only the new pool vs
+  test — the 25% train↔test leakage was found later (Stage-1 audit,
+  21 Nov; see the 2026-11-21 entry).
+
+## [Entry 2026-11-20] Dataset v2.1 — hard-example mining (train 13,242)
+
+* **What:** mined hard positives/negatives from real video (UCF
+  shooting, test clips, webcam2) + 1,177 Roboflow knife + 305 weather
+  variants, on a 0.5× v2 replay (10,905) — train 13,242. Two
+  fine-tunes from v2 (v2.1 25 epochs, v2.2 40 epochs early-stopped @14)
+  both GATE FAILED on the clean test (0.8108 / 0.7955) while fixing the
+  hard-frame failure modes (phone→Gun, knife→Gun, UCF debris FPs).
+  Lesson recorded in the run log: fine-tuning trades clean accuracy
+  for robustness; the fix is a full retrain, not a gentler recipe.
+* **Detail:** `V21_TRAINING_RUN_SHEET.md`,
+  `eval_v2_vs_v21_summary.md`, `eval_v2_v21_v22_summary.md`,
+  `docs/training_run_log.md` #4/#5.
+
+## [Entry 2026-11-21] Dataset v3 — combined full retrain (train 24,146) + Stage-1 leakage audit
+
+* **What:** full v2 train (21,809) + all v2.1 hard data (855 mined +
+  1,177 Roboflow + 305 weather) = train 24,146. 100-epoch full retrain
+  from COCO yolov8s.pt, Knife 2x oversampling. **ADOPTED** — frozen
+  test 0.8666, cleaned test 0.8378, hard frames F1 0.860 (beats v2.1's
+  0.805), all v2.1 failure-mode eliminations preserved. Same day the
+  Stage-1 audit found the frozen test leaks 25% into train (169/680,
+  incl. 18 byte-identical pairs) and val 22% (303/1,351) — every
+  frozen-test number in the run log is leakage-inflated; the cleaned
+  511-image test is the honest series.
+* **Detail:** `V3_ASSEMBLY_REPORT.md`, `eval_v3_summary.md`,
+  `audit-v4/audit_stage1_report.md`, `audit-v4/clean_test_eval.json`,
+  `docs/training_run_log.md` #6.
+
+## [Entry 2026-11-22] Dataset v4 — audit-cleaned retrain (train 23,268), GATE MIXED, v3 stays
+
+* **What:** 23,123 clean v3 replay (Stage-1 + Stage-2 audits: 1,023
+  exclusions, 25 flips, 26 adds, 5 reboxes) + 145 user-reviewed
+  Test8/Test9 hard frames = train 23,268. 100-epoch full retrain.
+  Gate MIXED: cleaned test 0.8081 (−3.0 pts vs v3, the measured cost
+  of decontamination), hard frames tied (F1 0.863 vs 0.860), unseen
+  slightly worse. The v4ft fine-tune (train 4,145, 8 epochs) GATE
+  FAILED first (cleaned 0.709) — third fine-tune failure, fine-tuning
+  is done for this problem. The live re-test the same day (user-run,
+  v4 OpenVINO, 215 snapshots) settled it: 18.5% confirmed-alarm
+  precision, Gun 0/25 — **v4 NOT adopted, v3 stays**.
+* **Detail:** `eval_v4ft_summary.md`, `eval_v4_summary.md`,
+  `field-test-v4/session1/tally.md`, `docs/training_run_log.md` #7/#8.
+
