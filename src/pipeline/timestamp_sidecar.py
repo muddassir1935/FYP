@@ -29,6 +29,12 @@ def sidecar_path_for(recording_path: str | Path) -> Path:
     return Path(f"{recording_path}.timestamps.jsonl")
 
 
+# Buffered writes are flushed every N lines, mirroring
+# _DetectionLog's LOG_FLUSH_EVERY_LINES in demo_worker.py: a crash
+# must not truncate the sidecar to whatever fit in the buffer.
+SIDECAR_FLUSH_EVERY_LINES = 50
+
+
 class TimestampSidecar:
     """One JSONL line per recorded frame: frame_index + monotonic ts."""
 
@@ -36,6 +42,7 @@ class TimestampSidecar:
         self.path = sidecar_path_for(recording_path)
         self._handle: object | None = None
         self._broken = False
+        self._lines_since_flush = 0
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._handle = open(self.path, "w", encoding="utf-8", buffering=8192)
@@ -66,6 +73,9 @@ class TimestampSidecar:
                 )
                 + "\n"
             )
+            self._lines_since_flush += 1
+            if self._lines_since_flush >= SIDECAR_FLUSH_EVERY_LINES:
+                self.flush()
         except Exception as exc:
             print(
                 f"WARNING: timestamp sidecar disabled ({exc}) "
@@ -79,11 +89,13 @@ class TimestampSidecar:
             return
         try:
             self._handle.flush()
+            self._lines_since_flush = 0
         except Exception:
             pass
 
     def close(self) -> None:
         handle, self._handle = self._handle, None
+        self._lines_since_flush = 0
         if handle is None:
             return
         try:

@@ -384,6 +384,12 @@ class InferenceWorker(threading.Thread):
         self._fps = 0.0
         self.error: str | None = None
         self._last_snapshot_at: dict[int, float] = {}
+        # Last loop generation seen from the stream (None when the
+        # stream has no counter, e.g. a test fake): a change means
+        # the looped file rewound, so tracker + voter must reset.
+        self._last_loop_generation: int | None = getattr(
+            stream, "loop_generation", None
+        )
 
     def stop(self) -> None:
         self._paused_event.clear()
@@ -436,6 +442,12 @@ class InferenceWorker(threading.Thread):
         seen = getattr(self._stream, "frames_seen", None)
         return seen if isinstance(seen, int) else 0
 
+    def _reset_tracker_and_voter(self) -> None:
+        """Drop ByteTrack state and all per-track votes."""
+        self._detector.reset_tracker()
+        self._voter.reset()
+        print("Tracker and class voter reset.")
+
     def _run_loop(self) -> None:
         last_index = 0
         while not self._stop_event.is_set():
@@ -444,9 +456,7 @@ class InferenceWorker(threading.Thread):
                 continue
             if self._reset_requested.is_set():
                 self._reset_requested.clear()
-                self._detector.reset_tracker()
-                self._voter.reset()
-                print("Tracker and class voter reset.")
+                self._reset_tracker_and_voter()
             packet = self._stream.read()
             if packet is None:
                 if self._stream.ended:
@@ -463,6 +473,16 @@ class InferenceWorker(threading.Thread):
             with self._lock:
                 self._fps = self._fps_counter.tick(tick)
             last_index = frame_index
+            # Looped file rewound since the last packet: end-of-clip
+            # tracks must not bleed into frame 1 of the new loop.
+            generation = getattr(self._stream, "loop_generation", None)
+            if isinstance(generation, int):
+                if (
+                    self._last_loop_generation is not None
+                    and generation != self._last_loop_generation
+                ):
+                    self._reset_tracker_and_voter()
+                self._last_loop_generation = generation
 
             try:
                 # The packet timestamp (monotonic, stamped at capture),
