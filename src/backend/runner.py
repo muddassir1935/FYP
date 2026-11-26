@@ -62,6 +62,7 @@ class RunConfig:
     conf_knife: float = CONF_KNIFE
     imgsz: int = 640
     min_hits: int = 3
+    confirm_window_s: float = 1.0
     tracker: str = "bytetrack.yaml"
     loop: bool = False
     hide_unconfirmed: bool = False
@@ -200,7 +201,9 @@ class DemoRunner:
                 "opencv-python is not installed; run: pip install opencv-python"
             ) from exc
 
-        voter = TrackClassVoter(min_hits=config.min_hits)
+        voter = TrackClassVoter(
+            min_hits=config.min_hits, confirm_window_s=config.confirm_window_s
+        )
         stream = FrameSource(source, loop_file=config.loop)
         try:
             stream.start()
@@ -261,10 +264,10 @@ class DemoRunner:
             raise RuntimeError(f"Could not start the run threads: {exc}") from exc
         logger.info(
             "run started: source=%s (%s) weights=%s conf Gun=%.2f Knife=%.2f "
-            "imgsz=%d min_hits=%d save_video=%s record_raw=%s",
+            "imgsz=%d min_hits=%d confirm_window=%.1fs save_video=%s record_raw=%s",
             config.source, config.source_type, config.weights_id,
             config.conf_gun, config.conf_knife, config.imgsz,
-            config.min_hits, config.save_video, config.record_raw,
+            config.min_hits, config.confirm_window_s, config.save_video, config.record_raw,
         )
         return self.status()
 

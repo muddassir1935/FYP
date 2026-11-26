@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -30,6 +31,28 @@ from src.pipeline.thresholds import as_dict as operating_point_dict
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "src" / "frontend"
 MAX_UPLOAD_MB = 500
+
+# Hosts the demo console is allowed to answer state-changing requests
+# for. The launcher binds loopback only (scripts/run_demo_ui.py), so
+# any other Host means a DNS-rebinding attempt, not a real user.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _host_without_port(host: str) -> str:
+    """Strip the port (and IPv6 brackets) from a Host header value."""
+    host = host.strip().lower()
+    if host.startswith("["):
+        # "[::1]:8000" -> "::1"; "[::1]" -> "::1".
+        return host[1:].split("]", 1)[0]
+    return host.split(":", 1)[0]
+
+
+def _origin_host(origin: str) -> str | None:
+    """Host part of an Origin header value, or None if unparseable."""
+    try:
+        return urlparse(origin).hostname
+    except ValueError:
+        return None
 
 
 def create_app(
@@ -65,6 +88,38 @@ def create_app(
     # `uvicorn src.backend.app:main_app` launch, where /api/server/
     # shutdown has nothing to signal and answers 409.
     app.state.uvicorn_server = None
+
+    # -- origin / host check -------------------------------------------
+    # The bodiless POSTs (/api/run/stop, /api/server/shutdown, ...) can
+    # be triggered by any open web page, so every non-GET request must
+    # prove it came from this console and not a foreign site:
+    #   * GETs pass through untouched (they change no state).
+    #   * A non-loopback Host is rejected outright (DNS-rebinding
+    #     defence — the launcher binds loopback only).
+    #   * With no Origin header (curl, same-machine scripts), a
+    #     loopback Host is enough.
+    #   * With an Origin header, its host must equal the request Host
+    #     (hosts compared, not ports — the launcher picks a free port
+    #     near 8000, so the port varies).
+    @app.middleware("http")
+    async def check_origin_host(request: Request, call_next):  # type: ignore[no-untyped-def]
+        if request.method != "GET":
+            host = _host_without_port(request.headers.get("host", ""))
+            if host not in LOOPBACK_HOSTS:
+                return JSONResponse(
+                    {"detail": "Forbidden: non-local Host header."},
+                    status_code=403,
+                )
+            origin = request.headers.get("origin")
+            if origin is not None and _origin_host(origin) != host:
+                return JSONResponse(
+                    {
+                        "detail": "Forbidden: Origin does not match "
+                        "this server (cross-origin request refused)."
+                    },
+                    status_code=403,
+                )
+        return await call_next(request)
 
     # -- pages & static -----------------------------------------------
     @app.get("/", include_in_schema=False)

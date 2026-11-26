@@ -8,11 +8,13 @@ the runner — so a v5 retune could silently desync them. Everything
 imports from here now: the runner, the API schema, and the CLI. The
 frontend fetches the same values from ``GET /api/defaults``.
 
-Values: val-tuned operating point for the v2 weights (Gun: constrained
-F1-optimal at precision >= 0.90; Knife: F1-optimal) — see
-``sentinel-dataset-v2/thresholds/operating_point.md``. Re-tune after a
-retrain and change ONLY this file (plus the frontend fetch, which reads
-it through the API).
+Values: operating point tuned for the v2 weights on the (leaky) val split
+(Gun: constrained F1-optimal at precision >= 0.90; Knife: F1-optimal) —
+see ``sentinel-dataset-v2/thresholds/operating_point.md``. It was never
+re-tuned for v3: the v3 retune on cleaned val (Gun 0.41 / Knife 0.31) is
+computed, not wired — the demo keeps 0.44/0.43 until the v5 retune.
+Re-tune after a retrain and change ONLY this file (plus the frontend
+fetch, which reads it through the API).
 """
 
 from __future__ import annotations

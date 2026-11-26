@@ -11,8 +11,10 @@ Ultralytics is imported lazily in ``__init__`` so this module can be
 imported (and the :class:`Detection` type used by the temporal buffer and
 its tests) without torch installed.
 
-Per-class confidence thresholds: Gun is the false-positive-prone class
-(val AP50 0.78 vs Knife 0.94), so it gets a higher threshold than Knife.
+Per-class confidence thresholds: the shipped point runs Gun slightly
+higher than Knife (0.44 vs 0.43) — that split was tuned for the v2
+weights on the val split, not from live behaviour. Live, Knife is the
+leaky class (it fires on any elongated object) and Gun is recall-limited.
 The values live in the demo (``scripts/inference/run_weapon_demo.py``),
 tuned on the val split — see
 ``sentinel-dataset-v2/thresholds/operating_point.md``. The detector runs
@@ -224,11 +226,15 @@ class WeaponDetector:
         """Detect + ByteTrack one frame; return ``(track_id, detection)`` pairs.
 
         Uses ``model.track(persist=True)`` so track IDs stay stable across
-        calls on consecutive frames of the same video. ByteTrack's
-        two-stage association matches high-confidence detections first,
-        then gives unmatched tracks a second chance against
-        low-confidence detections — a weak glimpse is enough to keep an
-        existing track alive. Call :meth:`reset_tracker` when the video
+        calls on consecutive frames of the same video. What keeps a track
+        alive through gaps is the lost-track buffer (``track_buffer=30``
+        in the stock ``bytetrack.yaml``): a track survives 30 frames
+        without a sighting, then gets a fresh ID if it reappears. The
+        tracker's two-stage association adds nothing here — the detector
+        runs at conf 0.40, above the stock high threshold (0.25), so
+        every box reaching the tracker is already a first-stage
+        detection and the low-confidence second stage (0.10–0.25) has
+        nothing to match. Call :meth:`reset_tracker` when the video
         source changes (new file, new camera) so stale tracks do not
         leak into the new stream.
 

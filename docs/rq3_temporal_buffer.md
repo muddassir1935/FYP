@@ -9,8 +9,10 @@ real-time threat detection?*
 > (window=10, required_hits=6, IoU 0.3), NOT a claim about the shipped demo.
 > The demo path no longer uses this buffer: `src/pipeline/demo_worker.py`
 > runs detection + ByteTrack tracking + class voting, and
-> `scripts/inference/run_weapon_demo.py` confirms after 4 consecutive
-> detections (`--min-hits` default 3). The 98.1% / 92% figures below
+> `scripts/inference/run_weapon_demo.py` confirms only while a track
+> has `--min-hits` sightings (default 3) within the last
+> `--confirm-window` seconds (default 1.0 s), lapsing when the density
+> drops. The 98.1% / 92% figures below
 > therefore describe the 6-of-10 buffer on combat footage — they must not
 > be quoted next to demo results. This is a large part of why RQ3 says 92%
 > confirmed-alarm precision while the v4 live field test says 18.5%: they

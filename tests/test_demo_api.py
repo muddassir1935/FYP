@@ -57,7 +57,11 @@ class ApiTestCase(unittest.TestCase):
             save_video_dir=root / "rec",
         )
         self.app = app
-        self.client = TestClient(app)
+        # Loopback base URL: the Origin/Host middleware rejects
+        # non-loopback Hosts, and the default TestClient host
+        # "testserver" is not loopback. The real launcher binds
+        # 127.0.0.1, so tests use the same host — no bypass in prod.
+        self.client = TestClient(app, base_url="http://127.0.0.1")
         self.runner = app.state.runner
 
     def tearDown(self) -> None:
@@ -309,6 +313,50 @@ class ApiTestCase(unittest.TestCase):
         res = self.client.post("/api/snapshots/clear")
         self.assertEqual(res.json(), {"removed": 1})
         self.assertEqual(self.client.get("/api/snapshots").json(), [])
+
+    def test_origin_host_same_origin_post_allowed(self) -> None:
+        # Same-origin POST: Origin host matches the Host header
+        # (ports are ignored — the launcher picks a free port).
+        res = self.client.post(
+            "/api/run/stop",
+            headers={"Origin": "http://127.0.0.1:8000"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"], "idle")
+
+    def test_origin_host_cross_origin_post_rejected(self) -> None:
+        # A foreign page triggering a bodiless POST must be refused.
+        res = self.client.post(
+            "/api/run/stop",
+            headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("Origin", res.json()["detail"])
+
+    def test_origin_host_missing_origin_loopback_allowed(self) -> None:
+        # Curl-style request: no Origin header, loopback Host.
+        res = self.client.post("/api/run/stop")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["state"], "idle")
+
+    def test_origin_host_foreign_host_rejected(self) -> None:
+        # DNS-rebinding defence: a non-local Host is refused even
+        # with no Origin header at all.
+        res = self.client.post(
+            "/api/run/stop",
+            headers={"Host": "evil.example"},
+        )
+        self.assertEqual(res.status_code, 403)
+        self.assertIn("Host", res.json()["detail"])
+
+    def test_origin_host_gets_pass_through(self) -> None:
+        # GETs change no state, so the check does not apply to them —
+        # even with a foreign Origin.
+        res = self.client.get(
+            "/api/health",
+            headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(res.status_code, 200)
 
     def test_snapshot_traversal_is_404(self) -> None:
         self.assertEqual(

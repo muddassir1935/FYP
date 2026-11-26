@@ -10,8 +10,9 @@ Runs the SAME clip twice with the SAME model and confidence threshold
   and on track-voted labels;
 * glimpses recovered — brief object appearances (4-5 consecutive frames)
   confirmed by each method (the 6/10 buffer can never confirm these;
-  with min_hits=3 the tracker needs 4 consecutive frames, so 3-frame
-  blips stay unconfirmed by design and are reported separately);
+  with min_hits=3 in a 1.0 s window the tracker confirms dense 3-frame
+  glimpses, so 3-frame blips stay unconfirmed by design and are reported
+  separately);
 * flicker rejection — 1-2 frame appearances confirmed by each method
   (both should be zero);
 * confirmation latency — frames from first sighting to first confirmation.
@@ -174,6 +175,8 @@ def main() -> int:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--min-hits", type=int, default=3, help="Tracker confirmation threshold.")
+    parser.add_argument("--confirm-window", type=float, default=1.0,
+                        help="Seconds the --min-hits sightings must fall inside (default 1.0).")
     parser.add_argument("--buffer-window", type=int, default=10)
     parser.add_argument("--buffer-hits", type=int, default=6)
     parser.add_argument("--tracker", default="bytetrack.yaml")
@@ -215,8 +218,18 @@ def main() -> int:
           f"(start={args.start_frame}, conf={args.conf}, imgsz={args.imgsz})")
 
     # ---- Pass B: track() + voter ------------------------------------------
+    # The voter needs timestamps, and this script runs offline (faster
+    # than real time), so wall-clock time would compress the video:
+    # use VIDEO time (frame_index / fps) instead, which is what the
+    # live demo sees. Falls back to 30 fps if the clip reports none.
+    _cap = cv2.VideoCapture(args.source)
+    _fps = _cap.get(cv2.CAP_PROP_FPS) if _cap.isOpened() else 0.0
+    _cap.release()
+    clip_fps = _fps if _fps and _fps > 0 else 30.0
     detector.reset_tracker()
-    voter = TrackClassVoter(min_hits=args.min_hits)
+    voter = TrackClassVoter(
+        min_hits=args.min_hits, confirm_window_s=args.confirm_window
+    )
     tracked_by_frame: List[List[Tuple[int, Detection]]] = []
     voted_by_frame: List[List[TrackedDetection]] = []
     voted_by_track: Dict[int, List[Tuple[int, int]]] = {}  # id -> [(frame, voted class)]
@@ -229,7 +242,7 @@ def main() -> int:
         tracked_by_frame.append(tracked)
         for track_id, det in tracked:
             raw_by_track.setdefault(track_id, []).append(det.class_id)
-        voted = voter.update(tracked)
+        voted = voter.update(tracked, now=frame_index / clip_fps)
         voted_by_frame.append(voted)
         for t in voted:
             if t.confirmed:
@@ -320,7 +333,7 @@ def main() -> int:
           f"tracker {trk_by_len['4-5']} of {length_hist['4-5']}")
     print(f"  blips (3f) confirmed:      buffer {buf_by_len['3']}, "
           f"tracker {trk_by_len['3']} of {length_hist['3']} "
-          f"(tracker needs 4 consecutive frames at min_hits=3)")
+          f"(tracker needs {args.min_hits} hits in {args.confirm_window:.1f}s)")
     print(f"  flicker (1-2f) confirmed:  buffer {buf_by_len['1-2']}, "
           f"tracker {trk_by_len['1-2']} of {length_hist['1-2']} (want 0)")
     print(f"  long (6+f) confirmed:      buffer {buf_by_len['6+']}, "
@@ -349,6 +362,7 @@ def main() -> int:
             "conf": args.conf,
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
+            "confirm_window_s": args.confirm_window,
             "raw_by_frame": [[det_dict(d) for d in f] for f in raw_by_frame],
             "buffer_conf_by_frame": [
                 [det_dict(d) for d in f] for f in buffer_conf_by_frame
@@ -383,6 +397,7 @@ def main() -> int:
             "conf": args.conf,
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
+            "confirm_window_s": args.confirm_window,
             "buffer_window": args.buffer_window,
             "buffer_hits": args.buffer_hits,
             "raw_detections_buffer_pass": total_raw_a,
