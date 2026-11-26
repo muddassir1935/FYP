@@ -261,13 +261,13 @@ class TestValidation(RunnerTestCase):
         def fake_detector(_path, *, device=None, **_kwargs):
             devices_tried.append(device)
             det = MagicMock()
-            if device == "xpu":
+            if device == "intel:gpu":
                 det.warmup.side_effect = RuntimeError("iGPU compile failed")
             return det
 
         with (
             patch.object(
-                DemoRunner, "_detect_openvino_device", return_value="xpu"
+                DemoRunner, "_detect_openvino_device", return_value="intel:gpu"
             ),
             patch("src.backend.runner.WeaponDetector", side_effect=fake_detector),
         ):
@@ -275,7 +275,7 @@ class TestValidation(RunnerTestCase):
                 ov_dir, _cfg(weights_id="v3_openvino_model")
             )
 
-        self.assertEqual(devices_tried, ["xpu", None])
+        self.assertEqual(devices_tried, ["intel:gpu", None])
         self.assertIsNotNone(det)
         self.assertEqual(self.runner._cached_detector_key[2], None)
         # The fallback must be recorded, not silent.

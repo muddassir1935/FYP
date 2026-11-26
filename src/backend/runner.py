@@ -651,11 +651,13 @@ class DemoRunner:
 
     @staticmethod
     def _detect_openvino_device(weights_path: Path) -> str | None:
-        """Select ``"xpu"`` for OpenVINO folders when an Intel GPU is
+        """Select ``"intel:gpu"`` for OpenVINO folders when an Intel GPU is
         available, leaving PyTorch (.pt) and CPU-only machines untouched.
 
         Delegates to :func:`src.pipeline.detect_openvino_device`, the
-        helper shared with the CLI demo.
+        helper shared with the CLI demo. (``"xpu"`` must never be
+        returned: ``select_device("xpu")`` raises on the pinned
+        ``torch==2.15.0+cpu`` — see that helper's docstring.)
         """
         return detect_openvino_device(weights_path)
 
@@ -703,7 +705,7 @@ class DemoRunner:
             )
             detector.warmup(tracker=config.tracker)
         except Exception as exc:
-            if device != "xpu":
+            if device != "intel:gpu":
                 raise
             # Fall back to auto/CPU if Intel GPU compilation fails —
             # but say so loudly: a silent fallback runs the jury demo

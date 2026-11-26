@@ -759,6 +759,26 @@ class TestCliHelpers(unittest.TestCase):
             self.cli.resolve_thresholds(args), (0.6, 0.5, 0.5)
         )
 
+    def test_span_above_window_rejected(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["run_weapon_demo.py", "--confirm-window", "1.0",
+             "--confirm-min-span", "1.5"],
+        ):
+            with self.assertRaises(SystemExit):
+                self.cli.parse_args()
+
+    def test_span_equal_to_window_accepted(self) -> None:
+        with patch.object(
+            sys,
+            "argv",
+            ["run_weapon_demo.py", "--confirm-window", "1.0",
+             "--confirm-min-span", "1.0"],
+        ):
+            args = self.cli.parse_args()
+        self.assertEqual(args.confirm_min_span, 1.0)
+
     def test_record_raw_defaults_true(self) -> None:
         with patch.object(sys, "argv", ["run_weapon_demo.py"]):
             self.assertTrue(self.cli.parse_args().record_raw)
@@ -912,11 +932,25 @@ class TestDetectOpenvinoDevice(unittest.TestCase):
             detect_openvino_device(self.weights / "best.pt")
         )
 
-    def test_openvino_folder_with_gpu_selects_xpu(self) -> None:
+    def test_openvino_folder_with_gpu_selects_intel_gpu(self) -> None:
         with patch.dict(
             sys.modules, {"openvino": self._fake_ov(["CPU", "GPU.0"])}
         ):
-            self.assertEqual(detect_openvino_device(self.ov_dir), "xpu")
+            self.assertEqual(
+                detect_openvino_device(self.ov_dir), "intel:gpu"
+            )
+
+    def test_openvino_device_never_returns_xpu(self) -> None:
+        # "xpu" is a PyTorch device name; select_device("xpu") raises
+        # on torch==2.15.0+cpu (torch.xpu unavailable) and crashed
+        # every --device auto run — the helper must never emit it.
+        for devices in (["CPU", "GPU.0"], ["GPU"], ["CPU"], []):
+            with patch.dict(
+                sys.modules, {"openvino": self._fake_ov(devices)}
+            ):
+                result = detect_openvino_device(self.ov_dir)
+                self.assertNotEqual(result, "xpu")
+                self.assertIn(result, (None, "intel:gpu"))
 
     def test_openvino_folder_without_gpu_selects_none(self) -> None:
         with patch.dict(
