@@ -8,9 +8,13 @@ voting for confirmation (FR-05), on-screen boxes, and a snapshot saved
 whenever a threat is confirmed.
 
 Confirmation works in two stages. ByteTrack (``model.track``) gives each
-physical object a stable ID across frames — its two-stage association
-keeps a track alive through weak detections, so brief true glimpses are
-not lost. The track voter then assigns ONE stable label per track (a
+physical object a stable ID across frames — a track survives gaps via
+the lost-track buffer (``track_buffer=30`` in the stock
+``bytetrack.yaml``), so brief true glimpses are not lost. (The
+tracker's two-stage association adds nothing here: the detector runs
+at conf 0.40, above the stock high threshold 0.25, so every box
+reaching the tracker is already a first-stage detection.) The track
+voter then assigns ONE stable label per track (a
 confidence-weighted majority vote over the track's lifetime), so the
 same object no longer flip-flops between Gun and Knife. A track
 confirms only while it has ``--min-hits`` sightings within the last

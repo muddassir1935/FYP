@@ -226,11 +226,15 @@ class WeaponDetector:
         """Detect + ByteTrack one frame; return ``(track_id, detection)`` pairs.
 
         Uses ``model.track(persist=True)`` so track IDs stay stable across
-        calls on consecutive frames of the same video. ByteTrack's
-        two-stage association matches high-confidence detections first,
-        then gives unmatched tracks a second chance against
-        low-confidence detections — a weak glimpse is enough to keep an
-        existing track alive. Call :meth:`reset_tracker` when the video
+        calls on consecutive frames of the same video. What keeps a track
+        alive through gaps is the lost-track buffer (``track_buffer=30``
+        in the stock ``bytetrack.yaml``): a track survives 30 frames
+        without a sighting, then gets a fresh ID if it reappears. The
+        tracker's two-stage association adds nothing here — the detector
+        runs at conf 0.40, above the stock high threshold (0.25), so
+        every box reaching the tracker is already a first-stage
+        detection and the low-confidence second stage (0.10–0.25) has
+        nothing to match. Call :meth:`reset_tracker` when the video
         source changes (new file, new camera) so stale tracks do not
         leak into the new stream.
 
