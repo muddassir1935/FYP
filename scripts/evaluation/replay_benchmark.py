@@ -9,10 +9,20 @@ the voter VIDEO time, never wall-clock time.
 
 Timing: if ``<video>.timestamps.jsonl`` exists next to the video it is
 consumed (one ``{"frame_index", "ts"}`` line per frame, the format
-written by :mod:`src.pipeline.timestamp_sidecar`); the sidecar line
-count must equal the video frame count or the run FAILS LOUDLY
+written by :mod:`src.pipeline.timestamp_sidecar`). The sidecar is
+1-indexed and may be non-contiguous (live captures drop frames), so
+lines are matched to frames positionally and only checked for
+strictly-increasing ``frame_index`` and non-decreasing ``ts``; the
+timestamps are normalized to elapsed seconds (``t == 0`` at the first
+line) because sidecars store raw ``time.monotonic()`` uptime. The
+sidecar line count must equal the video frame count (checked upfront
+when the video reports one, else after EOF) or the run FAILS LOUDLY
 (non-zero exit) instead of silently evaluating at the wrong speed.
 Otherwise the frame timestamp is ``frame_index / fps`` from the video.
+
+Weights may be a ``.pt`` file or an OpenVINO model folder; ``--device
+auto`` selects the OpenVINO Intel GPU (``"xpu"``) for model folders
+when one is available.
 
 Confirmed detections merge into ALARM EVENTS: same class, gap <=
 ``--cooldown-s`` (default 5.0 s) between consecutive confirmed frames.
@@ -56,7 +66,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import sys
 from dataclasses import dataclass, field
@@ -67,13 +76,20 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.pipeline.demo_worker import _hash_weights  # noqa: E402
+from src.pipeline.thresholds import CONF_GUN, CONF_KNIFE  # noqa: E402
 from src.pipeline.timestamp_sidecar import sidecar_path_for  # noqa: E402
 from src.pipeline.track_voting import TrackClassVoter  # noqa: E402
-from src.pipeline.weapon_detector import WeaponDetector  # noqa: E402
+from src.pipeline.weapon_detector import (  # noqa: E402
+    WeaponDetector,
+    detect_openvino_device,
+)
 
 DEFAULT_WEIGHTS = "models/weights/weapon_yolov8s_v3_best.pt"
-DEFAULT_CONF_GUN = 0.44
-DEFAULT_CONF_KNIFE = 0.43
+# Operating-point defaults live in src/pipeline/thresholds (single
+# source of truth) — never retype the numbers here.
+DEFAULT_CONF_GUN = CONF_GUN
+DEFAULT_CONF_KNIFE = CONF_KNIFE
 DEFAULT_MIN_HITS = 3
 DEFAULT_CONFIRM_WINDOW_S = 1.0
 DEFAULT_CONFIRM_MIN_SPAN_S = 0.4
@@ -193,26 +209,42 @@ def validate_args(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
-def load_sidecar_timestamps(path: Path, frame_count: int) -> List[float]:
-    """Read sidecar ``ts`` values, asserting one line per video frame.
+def load_sidecar_timestamps(
+    path: Path, frame_count: Optional[int]
+) -> List[float]:
+    """Read sidecar ``ts`` values, normalized to elapsed seconds.
 
-    Raises ``ValueError`` with a clear message when the line count does
-    not match ``frame_count`` or a line's ``frame_index`` is out of
-    order — a short sidecar would otherwise silently evaluate the clip
-    at the wrong speed.
+    Returns one timestamp per sidecar line, in file order, with
+    ``t == 0.0`` at the first line (``[t - raw[0] for t in raw]``) —
+    sidecars store raw ``time.monotonic()`` uptime, but the GT
+    intervals in ``--intervals`` are relative, so returning uptime
+    would make every overlap check miss (0% interval recall).
+
+    Raises ``ValueError`` with a clear message when the line count
+    disagrees with ``frame_count`` (skipped when ``frame_count`` is
+    None — the caller then verifies the count after EOF), when a
+    ``frame_index`` is not strictly increasing, or when a ``ts`` goes
+    backwards. Real sidecars are **1-indexed** (``capture.py`` starts
+    its index at 0 and increments before storing the first packet) and
+    **non-contiguous** (a live webcam drops frames), so the
+    ``frame_index`` values are only ever checked for order — NEVER
+    compared to the line number. The caller maps line ``i`` to replay
+    frame ``i`` positionally.
     """
     lines = [
         line for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    if len(lines) != frame_count:
+    if frame_count is not None and len(lines) != frame_count:
         raise ValueError(
             f"Timestamp sidecar {path} has {len(lines)} lines but the "
             f"video has {frame_count} frames — refusing to replay at "
             "the wrong speed. Re-record the sidecar or delete it to "
             "fall back to frame_index/fps timing."
         )
-    timestamps: List[float] = []
+    raw: List[float] = []
+    prev_index: Optional[int] = None
+    prev_ts: Optional[float] = None
     for i, line in enumerate(lines):
         try:
             entry = json.loads(line)
@@ -223,14 +255,25 @@ def load_sidecar_timestamps(path: Path, frame_count: int) -> List[float]:
                 f"Timestamp sidecar {path} line {i + 1} is not a "
                 f'{{"frame_index", "ts"}} record: {line!r} ({exc})'
             ) from exc
-        if frame_index != i:
+        if prev_index is not None and frame_index <= prev_index:
             raise ValueError(
                 f"Timestamp sidecar {path} line {i + 1} has "
-                f"frame_index {frame_index}, expected {i} — the sidecar "
+                f"frame_index {frame_index}, which is not strictly "
+                f"greater than the previous {prev_index} — the sidecar "
                 "does not line up with the video frames."
             )
-        timestamps.append(ts)
-    return timestamps
+        if prev_ts is not None and ts < prev_ts:
+            raise ValueError(
+                f"Timestamp sidecar {path} line {i + 1} has ts {ts}, "
+                f"which goes backwards from the previous {prev_ts}."
+            )
+        prev_index = frame_index
+        prev_ts = ts
+        raw.append(ts)
+    if not raw:
+        return []
+    first = raw[0]
+    return [t - first for t in raw]
 
 
 def frame_timestamp(
@@ -238,8 +281,22 @@ def frame_timestamp(
     sidecar_ts: Optional[Sequence[float]],
     fps: float,
 ) -> float:
-    """Video time for one frame: sidecar ``ts`` when present, else ``frame_index / fps``."""
+    """Video time for one frame: sidecar ``ts`` when present, else ``frame_index / fps``.
+
+    ``sidecar_ts`` holds ELAPSED seconds (see
+    :func:`load_sidecar_timestamps`): line ``i`` is replay frame ``i``
+    positionally. A frame past the end of the sidecar is a clean
+    ``ValueError`` (the caller exits 2) — never an ``IndexError``:
+    some containers decode more frames than ``CAP_PROP_FRAME_COUNT``
+    reports, and an uncaught traceback would hide which timing broke.
+    """
     if sidecar_ts is not None:
+        if frame_index >= len(sidecar_ts):
+            raise ValueError(
+                f"frame {frame_index} is past the end of the timestamp "
+                f"sidecar ({len(sidecar_ts)} lines) — the video decoded "
+                "more frames than the sidecar covers."
+            )
         return float(sidecar_ts[frame_index])
     if not fps or fps <= 0:
         raise ValueError(
@@ -288,13 +345,33 @@ def merge_confirmed_frames(
     return events
 
 
-def sha256_file(path: Path) -> str:
-    """SHA-256 of a file (weights are ~90 MB — one streamed pass)."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def weights_fingerprint(weights_path: Path) -> dict:
+    """Hash info for a weights path — never raises.
+
+    A ``.pt`` file hashes directly; an OpenVINO model folder has no
+    single weights file, so :func:`src.pipeline.demo_worker._hash_weights`
+    hashes the ``.bin`` (+ ``.xml``) instead. A path with nothing to
+    hash records null hashes with a note saying so.
+    """
+    bin_hash, xml_hash, note = _hash_weights(weights_path)
+    return {
+        "weights_sha256": bin_hash,
+        "weights_xml_sha256": xml_hash,
+        "weights_note": note,
+    }
+
+
+def resolve_device(device_arg: str, weights_path: Path) -> Optional[str]:
+    """Detector device for a replay run.
+
+    An explicit ``--device`` wins. ``auto`` selects the OpenVINO Intel
+    GPU (``"xpu"``) for OpenVINO model folders when one is available
+    and leaves everything else to ultralytics' choice (``None``) —
+    the same selection the web UI runner and the CLI demo use.
+    """
+    if device_arg != "auto":
+        return device_arg
+    return detect_openvino_device(weights_path)
 
 
 def load_intervals_doc(path: Path) -> dict:
@@ -400,8 +477,15 @@ def score_labeled_frames(
     def overlapped(t: float) -> bool:
         return any(abs(c.ts - t) <= window_s for c in matching)
 
+    # Negative frames: ANY confirmed class overlapping one is an FP
+    # indicator, not just the clip's own class — on the UCF clips
+    # ("class": "Gun") a confirmed Knife FP would otherwise be
+    # silently ignored.
+    def overlapped_any(t: float) -> bool:
+        return any(abs(c.ts - t) <= window_s for c in confirmed)
+
     recalled = sum(1 for f in positives if overlapped(float(f["t"])))
-    neg_hit = sum(1 for f in negatives if overlapped(float(f["t"])))
+    neg_hit = sum(1 for f in negatives if overlapped_any(float(f["t"])))
     return {
         "mode": "recall_only_labeled_frames",
         "class": class_name,
@@ -459,6 +543,27 @@ def score_against_intervals(
     }
 
 
+def load_timing_sidecar(
+    video_path: Path, reported_frames: int
+) -> tuple[Optional[List[float]], str]:
+    """Load the sidecar next to a video, when one exists.
+
+    Returns ``(timestamps, "sidecar")`` or ``(None, "fps")``. A present
+    sidecar is ALWAYS loaded — even when the video reports no frame
+    count (``reported_frames <= 0``), in which case the line count is
+    verified against the frames actually read, after EOF. Raises
+    ``ValueError`` when a present sidecar is malformed or its line
+    count disagrees with a positive reported frame count, so the
+    caller fails loudly before spending any time on inference.
+    """
+    sidecar_path = sidecar_path_for(video_path)
+    if not sidecar_path.is_file():
+        return None, "fps"
+    return load_sidecar_timestamps(
+        sidecar_path, reported_frames if reported_frames > 0 else None
+    ), "sidecar"
+
+
 def write_events_csv(path: Path, events: List[AlarmEvent]) -> None:
     """One row per alarm event."""
     with open(path, "w", encoding="utf-8", newline="") as handle:
@@ -504,10 +609,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"error: video not found: {video_path}", file=sys.stderr)
         return 2
     weights_path = Path(args.weights)
-    if not weights_path.is_file():
+    # A weights path may be a .pt file OR an OpenVINO model folder —
+    # is_file() would reject every OpenVINO export.
+    if not weights_path.exists():
         print(f"error: weights not found: {weights_path}", file=sys.stderr)
         return 2
-    device = None if args.device == "auto" else args.device
+    device = resolve_device(args.device, weights_path)
 
     try:
         import cv2
@@ -523,25 +630,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     reported_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
-    sidecar_path = sidecar_path_for(video_path)
-    sidecar_ts: Optional[List[float]] = None
-    timing_source = "fps"
-    if sidecar_path.is_file():
-        # Fail loudly on a mismatch against the reported frame count
-        # before spending any time on inference.
-        if reported_frames > 0:
-            try:
-                sidecar_ts = load_sidecar_timestamps(
-                    sidecar_path, reported_frames
-                )
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-        timing_source = "sidecar"
+    # Always load the sidecar when it exists — even when the video
+    # reports no frame count (reported_frames <= 0): the line count is
+    # then verified against the frames actually read, after EOF below.
+    # timing_source only says "sidecar" when one was actually loaded.
+    try:
+        sidecar_ts, timing_source = load_timing_sidecar(
+            video_path, reported_frames
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if timing_source == "fps" and (not fps or fps <= 0):
         print(
             f"error: video {video_path} reports no FPS and no timestamp "
-            f"sidecar exists at {sidecar_path} — cannot compute video time.",
+            f"sidecar exists at {sidecar_path_for(video_path)} — cannot "
+            "compute video time.",
             file=sys.stderr,
         )
         return 2
@@ -620,7 +724,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # count) still has to match the frames actually read.
     if sidecar_ts is not None and len(sidecar_ts) != frame_index:
         print(
-            f"error: timestamp sidecar {sidecar_path} has "
+            f"error: timestamp sidecar {sidecar_path_for(video_path)} has "
             f"{len(sidecar_ts)} lines but {frame_index} frames were read "
             "— refusing to report results at the wrong speed.",
             file=sys.stderr,
@@ -645,10 +749,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         scoring = score_against_intervals(
             intervals_doc, video_path, events, confirmed
         )
+    fingerprint = weights_fingerprint(weights_path)
     result = {
         "video": str(video_path),
         "weights": weights_path.name,
-        "weights_sha256": sha256_file(weights_path),
+        "weights_sha256": fingerprint["weights_sha256"],
+        "weights_xml_sha256": fingerprint["weights_xml_sha256"],
+        "weights_note": fingerprint["weights_note"],
         "conf_gun": args.conf_gun,
         "conf_knife": args.conf_knife,
         "min_hits": args.min_hits,
