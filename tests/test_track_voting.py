@@ -71,7 +71,24 @@ class TestConfirmation(unittest.TestCase):
 
 
 class TestDensityConfirmation(unittest.TestCase):
-    """The density rule: sparse sightings must never confirm."""
+    """The density rule: sightings must be dense within the window.
+
+    Only in-window sightings count, so sightings more than a window
+    apart never combine — but gaps inside the window are tolerated:
+    three sightings at 0.0, 0.5 and 0.9 s DO confirm (span is
+    first-to-last, not continuity).
+    """
+
+    def test_sparse_sightings_within_window_do_confirm(self) -> None:
+        # Claude round-6 correction: the old docstring claimed sparse
+        # sightings spread over a second never confirm — but 0.0, 0.5
+        # and 0.9 s are 3 in-window hits spanning 0.9 s, so they do.
+        voter = TrackClassVoter(min_hits=3, confirm_window_s=1.0)
+        voter.update([(1, det())], now=0.0)
+        voter.update([(1, det())], now=0.5)
+        out = voter.update([(1, det())], now=0.9)
+        self.assertTrue(out[0].confirmed)
+        self.assertEqual(out[0].hits, 3)
 
     def test_sparse_hits_never_confirm(self) -> None:
         # Two hits, a gap longer than the window, then one more hit:
