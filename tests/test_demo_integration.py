@@ -116,6 +116,7 @@ class RealRunTestCase(unittest.TestCase):
             weights_dir=self.weights,
             snapshots_dir=self.snaps,
             save_video_dir=root / "rec",
+            log_dir=root / "logs",
         )
 
     def tearDown(self) -> None:
@@ -311,6 +312,10 @@ class TestStreamReattach(unittest.TestCase):
             save_video_dir=root / "rec",
         )
         self.runner = app.state.runner
+        # create_app() exposes no log_dir knob yet, so point this
+        # runner's detection logs at the temp dir directly — otherwise
+        # the real run below writes JSONL into <repo>/logs/.
+        self.runner.log_dir = root / "logs"
         self._patcher = patch(
             "src.backend.runner.WeaponDetector",
             side_effect=lambda *a, **k: FakeDetector(),
@@ -595,6 +600,7 @@ class TestInferenceWorker(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.snaps = Path(self._tmp.name) / "snaps"
         self.snaps.mkdir()
+        self.logs = Path(self._tmp.name) / "logs"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -614,6 +620,7 @@ class TestInferenceWorker(unittest.TestCase):
             cv2_module=cv2 or _FakeCv2Draw(),
             tracker="bytetrack.yaml",
             snapshots_dir=self.snaps,
+            log_dir=self.logs,
         )
         worker.start()
         worker.join(timeout=10)
@@ -775,6 +782,7 @@ class TestCliMain(unittest.TestCase):
         root = Path(self._tmp.name)
         self.videos = root / "videos"
         self.videos.mkdir()
+        self._logs = root / "logs"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -782,9 +790,19 @@ class TestCliMain(unittest.TestCase):
     def _run_cli(self, argv: list[str], detector: FakeDetector) -> int:
         import cv2
 
+        # The CLI demo has no --log-dir flag, so its InferenceWorker
+        # would log into <repo>/logs/ by default: wrap the constructor
+        # to redirect the log dir into this test's temp dir.
+        real_worker_cls = self.cli.InferenceWorker
+
+        def worker_factory(*args, **kwargs):
+            kwargs.setdefault("log_dir", self._logs)
+            return real_worker_cls(*args, **kwargs)
+
         with (
             patch.object(sys, "argv", argv),
             patch.object(self.cli, "WeaponDetector", return_value=detector),
+            patch.object(self.cli, "InferenceWorker", side_effect=worker_factory),
             patch.object(cv2, "imshow"),
             patch.object(cv2, "waitKey", return_value=-1),
             patch.object(cv2, "getWindowProperty", return_value=1),

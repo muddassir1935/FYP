@@ -49,11 +49,13 @@ class RunnerTestCase(unittest.TestCase):
         self.snaps = root / "snaps"
         self.videos.mkdir()
         self.weights.mkdir()
+        self.logs = root / "logs"
         self.runner = DemoRunner(
             videos_dir=self.videos,
             weights_dir=self.weights,
             snapshots_dir=self.snaps,
             save_video_dir=root / "rec",
+            log_dir=self.logs,
         )
 
     def tearDown(self) -> None:
@@ -77,6 +79,7 @@ class TestListings(RunnerTestCase):
             videos_dir=self.videos,
             weights_dir=self.weights / "nope",
             snapshots_dir=self.snaps,
+            log_dir=self.logs,
         )
         self.assertEqual(runner.list_weights(), [])
 
@@ -153,6 +156,11 @@ class TestValidation(RunnerTestCase):
             with self.assertRaises(ValueError):
                 self.runner._resolve_weights(bad)
 
+    @unittest.skipIf(
+        sys.platform == "win32",
+        "creating a symlink needs elevated privilege on Windows "
+        "(WinError 1314)",
+    )
     def test_weights_symlink_escape_rejected(self) -> None:
         outside = Path(self._tmp.name) / "outside.pt"
         outside.write_bytes(b"x")
@@ -375,6 +383,7 @@ class TestStopRacingStart(RunnerTestCase):
             cv2_module=MagicMock(),
             tracker="bytetrack.yaml",
             snapshots_dir=self.snaps,
+            log_dir=self.logs,
         )
         self.runner._worker = worker
         self.runner._display_thread = threading.Thread(target=lambda: None)
@@ -431,6 +440,37 @@ class TestStopRacingStart(RunnerTestCase):
         if display_thread is not None:
             display_thread.join(timeout=5)
             self.assertFalse(display_thread.is_alive())
+
+
+class TestRecordingFilenameCollision(RunnerTestCase):
+    """Two runs planned in the same second must not overwrite each
+    other's recording (same-second stamp collision). No video needed:
+    the planning helper is deterministic given existing files."""
+
+    def test_same_second_runs_get_distinct_recording_paths(self) -> None:
+        rec = Path(self._tmp.name) / "rec"
+        rec.mkdir()
+        stamp = "20261126_120000"
+
+        first = DemoRunner._unique_recording_path(rec, stamp, True)
+        self.assertEqual(first.name, "demo_20261126_120000_raw.mp4")
+        first.touch()  # first run's recording now exists
+
+        second = DemoRunner._unique_recording_path(rec, stamp, True)
+        self.assertEqual(second.name, "demo_20261126_120000_raw_1.mp4")
+        self.assertNotEqual(first, second)
+        second.touch()
+
+        third = DemoRunner._unique_recording_path(rec, stamp, True)
+        self.assertEqual(third.name, "demo_20261126_120000_raw_2.mp4")
+
+    def test_annotated_recording_collides_independently(self) -> None:
+        rec = Path(self._tmp.name) / "rec"
+        rec.mkdir()
+        stamp = "20261126_120000"
+        (rec / "demo_20261126_120000.mp4").touch()
+        got = DemoRunner._unique_recording_path(rec, stamp, False)
+        self.assertEqual(got.name, "demo_20261126_120000_1.mp4")
 
 
 if __name__ == "__main__":
