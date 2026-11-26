@@ -284,6 +284,29 @@ class ApiTestCase(unittest.TestCase):
                 json={**base, "confirm_min_span_s": bad_span},
             )
             self.assertEqual(res.status_code, 422, bad_span)
+        # Span longer than the window can never be observed (the voter
+        # prunes hits older than the window before computing span_s),
+        # so it is rejected here instead of running a demo that can
+        # never alarm.
+        for window, span in ((1.0, 1.5), (0.5, 0.6), (2.0, 2.0 + 0.1)):
+            res = self.client.post(
+                "/api/run/start",
+                json={**base, "confirm_window_s": window,
+                      "confirm_min_span_s": span},
+            )
+            self.assertEqual(res.status_code, 422, (window, span))
+        # Span equal to the window is allowed (boundary is inclusive).
+        # Stub the runner so the valid request stops at validation
+        # instead of starting a real run (as the passing-knobs tests do).
+        from src.backend.runner import RunInfo
+
+        self.runner.start = lambda config: RunInfo(state="running")  # type: ignore[method-assign]
+        res = self.client.post(
+            "/api/run/start",
+            json={**base, "confirm_window_s": 1.0,
+                  "confirm_min_span_s": 1.0},
+        )
+        self.assertEqual(res.status_code, 200)
 
     def test_run_start_conflict_when_starting(self) -> None:
         self.runner._state = "starting"

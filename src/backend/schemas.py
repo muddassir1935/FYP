@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.pipeline.thresholds import CONF_GUN, CONF_KNIFE, DEFAULT_CONF
 
@@ -23,6 +23,23 @@ class RunStartRequest(BaseModel):
     confirm_window_s: float = Field(1.0, ge=0.1, le=5.0)
     confirm_min_span_s: float = Field(0.4, ge=0.0, le=2.0)
     tracker: str = Field("bytetrack.yaml", min_length=1)
+
+    @model_validator(mode="after")
+    def _check_span_within_window(self) -> "RunStartRequest":
+        """A span longer than the window can never be observed.
+
+        ``TrackClassVoter`` prunes hits older than the window before
+        computing ``span_s``, so ``confirm_min_span_s >
+        confirm_window_s`` makes confirmation mathematically
+        impossible — reject it here (422) instead of silently running
+        a demo that can never alarm.
+        """
+        if self.confirm_min_span_s > self.confirm_window_s:
+            raise ValueError(
+                "confirm_min_span_s must be <= confirm_window_s "
+                f"({self.confirm_min_span_s} > {self.confirm_window_s})"
+            )
+        return self
     loop: bool = False
     hide_unconfirmed: bool = False
     save_video: bool = False
