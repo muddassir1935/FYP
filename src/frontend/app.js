@@ -49,7 +49,7 @@ const state = {
   running: false,
   paused: false,
   // True while a POST /api/run/start request is in flight from this tab.
-  // Prevents a concurrent 500 ms status poll from overwriting the
+  // Prevents a concurrent 200 ms status poll from overwriting the
   // "Starting" UI with the previous "stopped"/"idle" status.
   starting: false,
   // Whether the <img> is attached to the current run's MJPEG stream.
@@ -384,7 +384,7 @@ function schedulePoll() {
   pollTimer = setTimeout(async () => {
     await pollStatus();
     if (!state.serverDown) schedulePoll();
-  }, 500);
+  }, 200);
 }
 
 els.runForm.addEventListener("submit", async (event) => {
@@ -400,6 +400,8 @@ els.runForm.addEventListener("submit", async (event) => {
     conf_knife: Number($("conf-knife").value),
     imgsz: Number($("imgsz").value),
     min_hits: Number($("min-hits").value),
+    confirm_window_s: Number($("confirm-window").value),
+    confirm_min_span_s: Number($("confirm-min-span").value),
     loop: $("opt-loop").checked,
     hide_unconfirmed: $("opt-hide").checked,
     save_video: $("opt-save").checked,

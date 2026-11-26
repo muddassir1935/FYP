@@ -106,6 +106,21 @@
       </fieldset>
 
       <fieldset>
+        <legend>Confirmation</legend>
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="confirm-window">Window (s)</label>
+            <input id="confirm-window" name="confirm-window" type="number" value="1.0" min="0.1" max="5" step="0.1">
+          </div>
+          <div>
+            <label class="field-label" for="confirm-min-span">Min span (s)</label>
+            <input id="confirm-min-span" name="confirm-min-span" type="number" value="0.4" min="0" max="2" step="0.1">
+          </div>
+        </div>
+        <p class="muted">Track-vote confirmation: hits inside the window confirm only if they span at least the minimum — a burst in one instant never confirms.</p>
+      </fieldset>
+
+      <fieldset>
         <legend>Options</legend>
         <div class="field-row">
           <div>

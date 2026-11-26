@@ -231,6 +231,60 @@ class ApiTestCase(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 409)
 
+    def test_run_start_passes_confirm_knobs_to_runner(self) -> None:
+        # The voter knobs must reach RunConfig, not just validate.
+        from src.backend.runner import RunInfo
+
+        captured: list = []
+        self.runner.start = lambda config: (  # type: ignore[method-assign]
+            captured.append(config), RunInfo(state="running")
+        )[1]
+        res = self.client.post(
+            "/api/run/start",
+            json={"source_type": "video", "source": "clip.mp4",
+                  "weights_id": "best.pt",
+                  "confirm_window_s": 2.5, "confirm_min_span_s": 0.8},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].confirm_window_s, 2.5)
+        self.assertEqual(captured[0].confirm_min_span_s, 0.8)
+
+    def test_run_start_confirm_knobs_default(self) -> None:
+        from src.backend.runner import RunInfo
+
+        captured: list = []
+        self.runner.start = lambda config: (  # type: ignore[method-assign]
+            captured.append(config), RunInfo(state="running")
+        )[1]
+        res = self.client.post(
+            "/api/run/start",
+            json={"source_type": "video", "source": "clip.mp4",
+                  "weights_id": "best.pt"},
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0].confirm_window_s, 1.0)
+        self.assertEqual(captured[0].confirm_min_span_s, 0.4)
+
+    def test_run_start_confirm_knobs_validation(self) -> None:
+        base = {"source_type": "video", "source": "clip.mp4",
+                "weights_id": "best.pt"}
+        # Window must be > 0 (the voter raises at <= 0) and <= 5.
+        for bad_window in (0.0, 0.05, 10.0):
+            res = self.client.post(
+                "/api/run/start",
+                json={**base, "confirm_window_s": bad_window},
+            )
+            self.assertEqual(res.status_code, 422, bad_window)
+        # Span must be >= 0 and <= 2.
+        for bad_span in (-0.1, 3.0):
+            res = self.client.post(
+                "/api/run/start",
+                json={**base, "confirm_min_span_s": bad_span},
+            )
+            self.assertEqual(res.status_code, 422, bad_span)
+
     def test_run_start_conflict_when_starting(self) -> None:
         self.runner._state = "starting"
         res = self.client.post(

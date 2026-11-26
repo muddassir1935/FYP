@@ -16,6 +16,12 @@ class RunStartRequest(BaseModel):
     conf_knife: float = Field(CONF_KNIFE, gt=0.0, le=1.0)
     imgsz: int = Field(640, ge=320, le=1280)
     min_hits: int = Field(3, ge=1, le=30)
+    # Confirmation window / minimum span for the track-vote voter
+    # (see TrackClassVoter): the CLI only bounds them as window > 0
+    # and span >= 0, so the API pins the rehearsal tuning range —
+    # window 0.1–5.0 s, span 0.0–2.0 s.
+    confirm_window_s: float = Field(1.0, ge=0.1, le=5.0)
+    confirm_min_span_s: float = Field(0.4, ge=0.0, le=2.0)
     tracker: str = Field("bytetrack.yaml", min_length=1)
     loop: bool = False
     hide_unconfirmed: bool = False

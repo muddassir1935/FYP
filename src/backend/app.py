@@ -249,6 +249,8 @@ def create_app(
             conf_knife=body.conf_knife,
             imgsz=body.imgsz,
             min_hits=body.min_hits,
+            confirm_window_s=body.confirm_window_s,
+            confirm_min_span_s=body.confirm_min_span_s,
             tracker=body.tracker,
             loop=body.loop,
             hide_unconfirmed=body.hide_unconfirmed,
