@@ -7,6 +7,7 @@ from .demo_worker import InferenceWorker
 from .rolling_fps import RollingFps
 from .temporal_buffer import ConfirmedDetection, TemporalConsistencyBuffer, bbox_iou
 from .thresholds import CONF_GUN, CONF_KNIFE, DEFAULT_CONF
+from .timestamp_sidecar import TimestampSidecar, sidecar_path_for
 from .track_voting import TrackClassVoter, TrackedDetection
 from .weapon_detector import Detection, WeaponDetector, detect_openvino_device
 
@@ -22,6 +23,8 @@ __all__ = [
     "RollingFps",
     "TrackClassVoter",
     "TrackedDetection",
+    "TimestampSidecar",
+    "sidecar_path_for",
     "InferenceWorker",
     "draw_annotations",
     "CONF_GUN",

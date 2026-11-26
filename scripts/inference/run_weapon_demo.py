@@ -18,9 +18,12 @@ voter then assigns ONE stable label per track (a
 confidence-weighted majority vote over the track's lifetime), so the
 same object no longer flip-flops between Gun and Knife. A track
 confirms only while it has ``--min-hits`` sightings within the last
-``--confirm-window`` seconds (defaults 3 in 1.0 s), and confirmation
-lapses when the density drops — sparse sightings spread over a second
-never confirm. The old 6-of-10 temporal buffer
+``--confirm-window`` seconds (defaults 3 in 1.0 s) AND the oldest
+in-window sighting is at least ``--confirm-min-span`` old (default
+0.4 s) — a burst of sightings inside the span never confirms, however
+dense it is, so the rule no longer weakens as the model gets faster.
+Confirmation lapses when the density drops — sparse sightings spread
+over a second never confirm. The old 6-of-10 temporal buffer
 (``src/pipeline/temporal_buffer.py``) is kept intact for RQ3
 reproducibility — the demo simply no longer uses it.
 
@@ -76,6 +79,7 @@ from src.pipeline import (
     FrameSource,
     InferenceWorker,
     RollingFps,
+    TimestampSidecar,
     TrackClassVoter,
     TrackedDetection,
     WeaponDetector,
@@ -155,6 +159,15 @@ def parse_args() -> argparse.Namespace:
         "below --min-hits in this window.",
     )
     parser.add_argument(
+        "--confirm-min-span",
+        type=float,
+        default=0.4,
+        help="Minimum observed presence for confirmation: the oldest "
+        "in-window sighting must be at least this many seconds old "
+        "(default 0.4). A burst of sightings inside the span never "
+        "confirms, however dense it is. 0 disables the span check.",
+    )
+    parser.add_argument(
         "--tracker",
         default="bytetrack.yaml",
         help="Ultralytics tracker config (default bytetrack.yaml; "
@@ -200,6 +213,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--min-hits must be >= 1")
     if args.confirm_window <= 0:
         parser.error("--confirm-window must be > 0")
+    if args.confirm_min_span < 0:
+        parser.error("--confirm-min-span must be >= 0")
     if args.display_width < 1 or args.display_height < 1:
         parser.error("--display-width and --display-height must be positive")
     if args.imgsz < 32:
@@ -308,7 +323,9 @@ def main() -> int:
         print(f"ERROR: model warmup failed: {exc}", file=sys.stderr)
         return 1
     voter = TrackClassVoter(
-        min_hits=args.min_hits, confirm_window_s=args.confirm_window
+        min_hits=args.min_hits,
+        confirm_window_s=args.confirm_window,
+        min_span_s=args.confirm_min_span,
     )
     source: int | str = int(args.source) if args.source.isdigit() else args.source
 
@@ -320,10 +337,11 @@ def main() -> int:
     print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
     print(f"Confidence thresholds: Gun={conf_gun:.2f} Knife={conf_knife:.2f}")
     print(f"Device: {device or 'auto'}")
-    print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits} in {args.confirm_window:.1f}s)")
+    print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits} in {args.confirm_window:.1f}s, min_span={args.confirm_min_span:.1f}s)")
     print("Press q to quit, r to reset the tracker and class voter.")
 
     writer = None
+    sidecar = None
     writer_failed = False
     display_fps = 0.0
     display_fps_counter = RollingFps()
@@ -344,6 +362,8 @@ def main() -> int:
         cv2_module=cv2,
         tracker=args.tracker,
         snapshots_dir=snapshots_dir,
+        source=args.source,
+        recording=args.save_video,
     )
     worker.start()
     try:
@@ -382,10 +402,17 @@ def main() -> int:
                             writer.release()
                             writer = None
                             writer_failed = True
+                        else:
+                            # True timing for the recording: one
+                            # monotonic timestamp per recorded frame,
+                            # joining the detection log on frame_index.
+                            sidecar = TimestampSidecar(args.save_video)
                     if writer is not None:
                         # Raw frames by default: the annotated
                         # recording is useless as training data.
                         writer.write(frame if args.record_raw else display)
+                        if sidecar is not None:
+                            sidecar.write(frame_index, _ts)
                 # Only the on-screen copy is scaled to fit the screen;
                 # recordings and snapshots keep the original resolution.
                 shown = fit_for_display(cv2, display, args.display_width, args.display_height)
@@ -415,6 +442,8 @@ def main() -> int:
 
     if writer is not None:
         writer.release()
+    if sidecar is not None:
+        sidecar.close()
     cv2.destroyAllWindows()
     if worker.error is not None:
         print(f"ERROR: inference failed: {worker.error}", file=sys.stderr)

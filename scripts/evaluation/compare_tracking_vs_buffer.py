@@ -10,9 +10,10 @@ Runs the SAME clip twice with the SAME model and confidence threshold
   and on track-voted labels;
 * glimpses recovered — brief object appearances (4-5 consecutive frames)
   confirmed by each method (the 6/10 buffer can never confirm these;
-  with min_hits=3 in a 1.0 s window the tracker confirms dense 3-frame
-  glimpses, so 3-frame blips stay unconfirmed by design and are reported
-  separately);
+  the tracker confirms them only when the sightings span at least
+  --confirm-min-span seconds (default 0.4 s) — at 30 fps a 3-frame
+  glimpse spans ~0.07 s and stays unconfirmed by design, and is
+  reported separately);
 * flicker rejection — 1-2 frame appearances confirmed by each method
   (both should be zero);
 * confirmation latency — frames from first sighting to first confirmation.
@@ -177,6 +178,9 @@ def main() -> int:
     parser.add_argument("--min-hits", type=int, default=3, help="Tracker confirmation threshold.")
     parser.add_argument("--confirm-window", type=float, default=1.0,
                         help="Seconds the --min-hits sightings must fall inside (default 1.0).")
+    parser.add_argument("--confirm-min-span", type=float, default=0.4,
+                        help="Minimum observed presence for tracker confirmation "
+                        "(default 0.4 s); 0 disables the span check.")
     parser.add_argument("--buffer-window", type=int, default=10)
     parser.add_argument("--buffer-hits", type=int, default=6)
     parser.add_argument("--tracker", default="bytetrack.yaml")
@@ -228,7 +232,9 @@ def main() -> int:
     clip_fps = _fps if _fps and _fps > 0 else 30.0
     detector.reset_tracker()
     voter = TrackClassVoter(
-        min_hits=args.min_hits, confirm_window_s=args.confirm_window
+        min_hits=args.min_hits,
+        confirm_window_s=args.confirm_window,
+        min_span_s=args.confirm_min_span,
     )
     tracked_by_frame: List[List[Tuple[int, Detection]]] = []
     voted_by_frame: List[List[TrackedDetection]] = []
@@ -333,7 +339,8 @@ def main() -> int:
           f"tracker {trk_by_len['4-5']} of {length_hist['4-5']}")
     print(f"  blips (3f) confirmed:      buffer {buf_by_len['3']}, "
           f"tracker {trk_by_len['3']} of {length_hist['3']} "
-          f"(tracker needs {args.min_hits} hits in {args.confirm_window:.1f}s)")
+          f"(tracker needs {args.min_hits} hits in {args.confirm_window:.1f}s "
+          f"spanning >= {args.confirm_min_span:.1f}s)")
     print(f"  flicker (1-2f) confirmed:  buffer {buf_by_len['1-2']}, "
           f"tracker {trk_by_len['1-2']} of {length_hist['1-2']} (want 0)")
     print(f"  long (6+f) confirmed:      buffer {buf_by_len['6+']}, "
@@ -363,6 +370,7 @@ def main() -> int:
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
             "confirm_window_s": args.confirm_window,
+            "min_span_s": args.confirm_min_span,
             "raw_by_frame": [[det_dict(d) for d in f] for f in raw_by_frame],
             "buffer_conf_by_frame": [
                 [det_dict(d) for d in f] for f in buffer_conf_by_frame
@@ -398,6 +406,7 @@ def main() -> int:
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
             "confirm_window_s": args.confirm_window,
+            "min_span_s": args.confirm_min_span,
             "buffer_window": args.buffer_window,
             "buffer_hits": args.buffer_hits,
             "raw_detections_buffer_pass": total_raw_a,
