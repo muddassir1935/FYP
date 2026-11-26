@@ -1,0 +1,367 @@
+{
+  "notes": [
+    "Hand-authored ground-truth intervals for scoring replay_benchmark.py alarm events on the v5 holdout clips. Video paths are relative to the dataset root ~/workspace/sentinel-dataset-v2 (NOT the repo: the videos are not in git). fps/duration_s from ffprobe/cv2 header reads, 2026-11-26.",
+    "DERIVATION (Knife clips): GT comes from the NON-EMPTY label files in the mining label dirs \u2014 the post-review kept set (mining/v5-home/knife/labels/: 77 positives; mining/v5-faiz/knife2-handheld/labels/: 18 positives). labels_log.csv was NOT used: it still lists pre-review positives (90 home, 25 Faiz) and does not reflect the Wave-1 drops (13 home frames) or Wave-2 drops (7 Faiz frames), all of which are absent from the label dirs.",
+    "EXTRACTION RATE: 1 fps for all three mining passes (home, Faiz, UCF) \u2014 stated in mining/v5-home/knife/summary.txt and mining/v5-faiz/knife2-handheld/summary.txt, and verified here by frame count ~= duration in seconds for every clip (e.g. home knife 116 frames / 116.33 s; Shooting011 133 frames / 133.43 s). Frame N is at t = N-1 seconds (first extracted frame is the video first frame at t=0). Each labeled frame stands for its 1-s sampling cell, so an interval ends at last-frame time + 1.0 s. Video fps was NOT used for the conversion.",
+    "MERGE RULE: sorted positive-frame times are merged into one interval; the interval splits when the gap between consecutive positive-frame times exceeds 2 s. A single missing frame (2 s gap) still merges.",
+    "NEGATIVE CLIPS (intervals []): v5-scissors, v5-pliers-green, v5-screwdriver, lowlight-mobile, lowlight-hammer2, lowlight-screwdriver2. No weapon is present in any of them, so every confirmed alarm on them is a false positive.",
+    "UCF RESTRICTION (decision): no full-clip gun intervals were hand-tagged for the 8 UCF clips, and no full-clip UCF alarm-event precision/recall is ever to be reported from this data \u2014 the sampled labeled frames cannot support it. Scoring is recall_only_labeled_frames ONLY, and NEVER a precision number.",
+    "UCF CORRECTION \u2014 READ BEFORE SCORING: all 40 labeled UCF frames in mining/v5-ucf/labels/ are NEGATIVES (0-byte label files; decision \"negative\" for all 40 in labels_log.csv). There is NO positive labeled UCF frame in this set, so labeled-frame recall is VACUOUS (null, not 0 and not 1). The only honest UCF number from this data is whether an alarm overlaps a labeled negative frame (an FP indicator), reported as such. Do NOT report a UCF recall number from these clips."
+  ],
+  "clips": [
+    {
+      "clip": "v5-knife-handheld",
+      "video": "videos/v5-home/v5-knife-handheld.mp4",
+      "fps": 28.341,
+      "duration_s": 116.33,
+      "class": "Knife",
+      "gt_positive_frames": 77,
+      "intervals": [
+        [
+          2.0,
+          30.0
+        ],
+        [
+          33.0,
+          43.0
+        ],
+        [
+          46.0,
+          55.0
+        ],
+        [
+          58.0,
+          65.0
+        ],
+        [
+          68.0,
+          73.0
+        ],
+        [
+          75.0,
+          102.0
+        ],
+        [
+          105.0,
+          106.0
+        ],
+        [
+          108.0,
+          111.0
+        ]
+      ]
+    },
+    {
+      "clip": "knife2-handheld",
+      "video": "videos/v5-faiz/Faiz-v5-knife2-handheld.mp4",
+      "fps": 14.992,
+      "duration_s": 43.89,
+      "class": "Knife",
+      "gt_positive_frames": 18,
+      "intervals": [
+        [
+          3.0,
+          11.0
+        ],
+        [
+          13.0,
+          16.0
+        ],
+        [
+          23.0,
+          28.0
+        ],
+        [
+          33.0,
+          34.0
+        ],
+        [
+          36.0,
+          42.0
+        ]
+      ]
+    },
+    {
+      "clip": "v5-scissors",
+      "video": "videos/v5-home/v5-scissors.mp4",
+      "fps": 29.888,
+      "duration_s": 121.55,
+      "intervals": []
+    },
+    {
+      "clip": "v5-pliers-green",
+      "video": "videos/v5-home/v5-pliers-green.mp4",
+      "fps": 30.0,
+      "duration_s": 89.93,
+      "intervals": []
+    },
+    {
+      "clip": "v5-screwdriver",
+      "video": "videos/v5-home/v5-screwdriver.mp4",
+      "fps": 29.931,
+      "duration_s": 105.01,
+      "intervals": []
+    },
+    {
+      "clip": "lowlight-mobile",
+      "video": "videos/v5-faiz/Faiz-v5-lowlight-mobile.mp4",
+      "fps": 14.999,
+      "duration_s": 39.94,
+      "intervals": []
+    },
+    {
+      "clip": "lowlight-hammer2",
+      "video": "videos/v5-faiz/Faiz-v5-lowlight-hammer2.mp4",
+      "fps": 14.996,
+      "duration_s": 63.42,
+      "intervals": []
+    },
+    {
+      "clip": "lowlight-screwdriver2",
+      "video": "videos/v5-faiz/Faiz-v5-lowlight-screwdriver2.mp4",
+      "fps": 14.994,
+      "duration_s": 53.49,
+      "intervals": []
+    },
+    {
+      "clip": "Shooting011",
+      "video": "ucf-crime/Videos/Shooting/Shooting011_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 133.43,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 6.0,
+          "decision": "negative"
+        },
+        {
+          "t": 60.0,
+          "decision": "negative"
+        },
+        {
+          "t": 73.0,
+          "decision": "negative"
+        },
+        {
+          "t": 85.0,
+          "decision": "negative"
+        },
+        {
+          "t": 104.0,
+          "decision": "negative"
+        },
+        {
+          "t": 114.0,
+          "decision": "negative"
+        },
+        {
+          "t": 125.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting002",
+      "video": "ucf-crime/Videos/Shooting/Shooting002_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 40.2,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 2.0,
+          "decision": "negative"
+        },
+        {
+          "t": 6.0,
+          "decision": "negative"
+        },
+        {
+          "t": 10.0,
+          "decision": "negative"
+        },
+        {
+          "t": 13.0,
+          "decision": "negative"
+        },
+        {
+          "t": 17.0,
+          "decision": "negative"
+        },
+        {
+          "t": 22.0,
+          "decision": "negative"
+        },
+        {
+          "t": 26.0,
+          "decision": "negative"
+        },
+        {
+          "t": 29.0,
+          "decision": "negative"
+        },
+        {
+          "t": 33.0,
+          "decision": "negative"
+        },
+        {
+          "t": 37.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting051",
+      "video": "ucf-crime/Videos/Shooting/Shooting051_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 46.63,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 3.0,
+          "decision": "negative"
+        },
+        {
+          "t": 7.0,
+          "decision": "negative"
+        },
+        {
+          "t": 16.0,
+          "decision": "negative"
+        },
+        {
+          "t": 26.0,
+          "decision": "negative"
+        },
+        {
+          "t": 30.0,
+          "decision": "negative"
+        },
+        {
+          "t": 35.0,
+          "decision": "negative"
+        },
+        {
+          "t": 39.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting005",
+      "video": "ucf-crime/Videos/Shooting/Shooting005_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 177.67,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 9.0,
+          "decision": "negative"
+        },
+        {
+          "t": 44.0,
+          "decision": "negative"
+        },
+        {
+          "t": 97.0,
+          "decision": "negative"
+        },
+        {
+          "t": 114.0,
+          "decision": "negative"
+        },
+        {
+          "t": 131.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting023",
+      "video": "ucf-crime/Videos/Shooting/Shooting023_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 13.87,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 1.0,
+          "decision": "negative"
+        },
+        {
+          "t": 6.0,
+          "decision": "negative"
+        },
+        {
+          "t": 8.0,
+          "decision": "negative"
+        },
+        {
+          "t": 9.0,
+          "decision": "negative"
+        },
+        {
+          "t": 10.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting048",
+      "video": "ucf-crime/Videos/Shooting/Shooting048_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 91.37,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 5.0,
+          "decision": "negative"
+        },
+        {
+          "t": 49.0,
+          "decision": "negative"
+        },
+        {
+          "t": 85.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting043",
+      "video": "ucf-crime/Videos/Shooting/Shooting043_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 62.47,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 3.0,
+          "decision": "negative"
+        },
+        {
+          "t": 33.0,
+          "decision": "negative"
+        }
+      ]
+    },
+    {
+      "clip": "Shooting044",
+      "video": "ucf-crime/Videos/Shooting/Shooting044_x264.mp4",
+      "fps": 30.0,
+      "duration_s": 15.47,
+      "scoring": "recall_only_labeled_frames",
+      "class": "Gun",
+      "labeled_frames_s": [
+        {
+          "t": 1.0,
+          "decision": "negative"
+        }
+      ]
+    }
+  ]
+}

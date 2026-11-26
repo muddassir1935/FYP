@@ -56,6 +56,33 @@ class TestTimestampSidecar(unittest.TestCase):
             [(line["frame_index"], line["ts"]) for line in lines], frames
         )
 
+    def test_flush_every_50_writes_without_close(self) -> None:
+        # Crash durability: the file on disk must hold the lines
+        # after 50 writes with no close() — the old code only flushed
+        # in close(), so a crash truncated the sidecar. The 8 KiB
+        # buffer holds ~200 of these short lines, so anything visible
+        # before 50 writes would be a flush, not the buffer filling.
+        sidecar = TimestampSidecar(self.rec)
+        try:
+            for i in range(1, 50):
+                sidecar.write(i, 100.0 + i * 0.01)
+            self.assertEqual(self._read_lines(sidecar.path), [])
+            sidecar.write(50, 100.5)
+            lines = self._read_lines(sidecar.path)
+            self.assertEqual(len(lines), 50)
+            self.assertEqual(
+                [line["frame_index"] for line in lines], list(range(1, 51))
+            )
+            # The counter resets on flush: the next flush lands on
+            # write 100, not write 51.
+            for i in range(51, 100):
+                sidecar.write(i, 100.0 + i * 0.01)
+            self.assertEqual(len(self._read_lines(sidecar.path)), 50)
+            sidecar.write(100, 101.0)
+            self.assertEqual(len(self._read_lines(sidecar.path)), 100)
+        finally:
+            sidecar.close()
+
     def test_close_is_idempotent_and_write_after_close_noops(self) -> None:
         sidecar = TimestampSidecar(self.rec)
         sidecar.write(1, 100.0)

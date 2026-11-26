@@ -109,11 +109,17 @@ class DemoRunner:
         weights_dir: Path,
         snapshots_dir: Path,
         save_video_dir: Path | None = None,
+        log_dir: Path | None = None,
     ) -> None:
         self.videos_dir = Path(videos_dir)
         self.weights_dir = Path(weights_dir)
         self.snapshots_dir = Path(snapshots_dir)
         self.save_video_dir = Path(save_video_dir) if save_video_dir else None
+        # Per-detection JSONL log dir, forwarded to InferenceWorker.
+        # None means "let the worker use its own default" (repo-root
+        # logs/) — passing None through would DISABLE logging, so the
+        # worker kwarg is only set when a dir was given (see start()).
+        self.log_dir = Path(log_dir) if log_dir is not None else None
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()
@@ -216,14 +222,16 @@ class DemoRunner:
         )
         # The recording filename is fixed up front — not when the first
         # frame is recorded — so the worker's log header can name it.
-        # (A stamp collision across runs in the same second keeps the
-        # old behaviour: the later run overwrites.)
+        # A stamp collision across runs in the same second gets a
+        # numeric suffix (demo_<stamp>_raw.mp4, demo_<stamp>_raw_1.mp4,
+        # ...) instead of overwriting the earlier recording.
         planned_recording: str | None = None
         if config.save_video and self.save_video_dir is not None:
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            suffix = "_raw" if config.record_raw else ""
             planned_recording = str(
-                self.save_video_dir / f"demo_{stamp}{suffix}.mp4"
+                self._unique_recording_path(
+                    self.save_video_dir, stamp, config.record_raw
+                )
             )
         self._planned_recording_path = planned_recording
         stream = FrameSource(source, loop_file=config.loop)
@@ -245,6 +253,11 @@ class DemoRunner:
             self._fail("Run cancelled while starting.")
             raise RuntimeError("Run cancelled while starting.")
 
+        worker_kwargs: dict = {}
+        if self.log_dir is not None:
+            # Explicit log dir only: omitting the kwarg keeps the
+            # worker's own default (repo-root logs/).
+            worker_kwargs["log_dir"] = self.log_dir
         worker = InferenceWorker(
             stream,
             detector,
@@ -258,6 +271,7 @@ class DemoRunner:
             # warns loudly in that case) — the file simply never appears.
             source=self._source_label(config),
             recording=planned_recording,
+            **worker_kwargs,
         )
         with self._lock:
             self._stream = stream
@@ -768,6 +782,22 @@ class DemoRunner:
         return str(candidate)
 
     @staticmethod
+    def _unique_recording_path(
+        save_video_dir: Path, stamp: str, record_raw: bool
+    ) -> Path:
+        """Recording path for a stamp, with a numeric suffix when the
+        planned file already exists (two runs in the same second):
+        ``demo_<stamp>[_raw].mp4``, then ``..._1.mp4``, ``..._2.mp4``.
+        Same idea as ``_DetectionLog``'s collision suffix."""
+        suffix = "_raw" if record_raw else ""
+        candidate = save_video_dir / f"demo_{stamp}{suffix}.mp4"
+        n = 1
+        while candidate.exists():
+            candidate = save_video_dir / f"demo_{stamp}{suffix}_{n}.mp4"
+            n += 1
+        return candidate
+
+    @staticmethod
     def _source_label(config: RunConfig | None) -> str:
         if config is None:
             return ""
@@ -784,6 +814,18 @@ class DemoRunner:
             self._stopped_at = time.time()
             frames = self._frames_shown
         logger.error("run failed: %s (frames=%d)", message, frames)
+
+    def _teardown_then_fail(self, message: str) -> None:
+        """Release the worker/stream handles BEFORE reporting the
+        error — mirroring stop(), which also sets "stopping" and tears
+        down first. If _fail ran first, the UI would see state "error"
+        and re-enable Start/Delete while the webcam/file handle was
+        still locked (WinError 32 on Windows). Used by _display_loop
+        only; the start() failure paths are unchanged."""
+        with self._lock:
+            self._state = "stopping"
+        self._teardown()
+        self._fail(message)
 
     @staticmethod
     def _probe_duration(path: Path) -> float | None:
@@ -817,8 +859,9 @@ class DemoRunner:
             with self._lock:
                 finished = self._state in ("stopped", "error", "idle")
             if not finished:
-                self._fail("Display loop started without a run configured.")
-                self._teardown()
+                self._teardown_then_fail(
+                    "Display loop started without a run configured."
+                )
             return
         me = threading.current_thread()
         fps_counter = RollingFps()
@@ -942,8 +985,9 @@ class DemoRunner:
             # of leaving the UI stuck on "Running".
             if current and still_running:
                 if worker.error is not None:
-                    self._fail(f"Inference failed: {worker.error}")
-                    self._teardown()
+                    self._teardown_then_fail(
+                        f"Inference failed: {worker.error}"
+                    )
                 elif stream.ended and (stream.is_live or last_index == 0):
                     # A live source only "ends" by dying, and a file that
                     # produced zero frames never played: neither is a
@@ -956,7 +1000,6 @@ class DemoRunner:
                     )
                     if stream.end_reason:
                         reason += f" ({stream.end_reason})"
-                    self._fail(reason)
-                    self._teardown()
+                    self._teardown_then_fail(reason)
                 else:
                     self.stop()

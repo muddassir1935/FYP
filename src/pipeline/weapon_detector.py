@@ -18,10 +18,17 @@ leaky class (it fires on any elongated object) and Gun is recall-limited.
 The values live in the demo (``scripts/inference/run_weapon_demo.py``),
 tuned on the val split — see
 ``sentinel-dataset-v2/thresholds/operating_point.md``. The detector runs
-the model once at the LOWEST threshold and post-filters per class, which
-is exactly equivalent to filtering each class before NMS (NMS always
-keeps the highest-confidence box, so a lower predict threshold can never
+the model once at the lowest threshold that still covers every class
+and post-filters per class, which is exactly equivalent to filtering each class before NMS (NMS always keeps the
+highest-confidence box, so a lower predict threshold can never
 suppress a box that would survive at the higher per-class threshold).
+When every class has an explicit per-class threshold, that lowest
+threshold is the minimum of the per-class thresholds — the fallback
+is NOT included, because a lower fallback would feed sub-threshold
+boxes to ByteTrack, which would activate/keep tracks alive across
+gaps even though the per-class filter drops them afterwards. When
+any class lacks an explicit threshold, the fallback is genuinely
+needed for that class, so it stays in the minimum.
 """
 
 from __future__ import annotations
@@ -86,7 +93,11 @@ class WeaponDetector:
     ``conf_threshold`` is the fallback threshold for any class without a
     per-class override. ``conf_thresholds`` maps a class id (``int``) or
     class name (``str``, e.g. ``"Gun"``) to that class's own threshold;
-    a class's own threshold wins over the fallback.
+    a class's own threshold wins over the fallback. The model is run
+    at ``_predict_conf``: the minimum per-class threshold when every
+    class has one, else the minimum of the fallback and the per-class
+    thresholds — so no box below every applicable threshold ever
+    reaches the tracker.
     """
 
     def __init__(
@@ -130,12 +141,11 @@ class WeaponDetector:
             dict(names) if isinstance(names, dict) else dict(enumerate(names))
         )
         self.conf_thresholds = self._resolve_thresholds(conf_thresholds or {})
-        # Predict at the lowest threshold so no candidate above any
-        # per-class threshold is pre-filtered away; filtering happens
-        # per class in detect().
-        self._predict_conf = min(
-            [conf_threshold] + list(self.conf_thresholds.values())
-        )
+        # Predict at the lowest threshold that still covers every class
+        # (see _compute_predict_conf): no candidate above its per-class
+        # threshold is pre-filtered away, and no sub-threshold box is
+        # offered to the tracker; filtering happens per class in detect().
+        self._predict_conf = self._compute_predict_conf()
 
     def _resolve_thresholds(
         self, thresholds: Dict[Union[int, str], float]
@@ -165,6 +175,25 @@ class WeaponDetector:
                 resolved[by_name[key]] = value
         return resolved
 
+    def _compute_predict_conf(self) -> float:
+        """The confidence to run the model at (``conf=`` for predict/track).
+
+        When every class in ``self.class_names`` has an explicit
+        per-class threshold, this is the minimum of those thresholds
+        — the fallback is NOT included, because it would feed boxes
+        below every per-class threshold to ByteTrack, which would
+        activate/keep tracks alive across sub-threshold gaps even
+        though the per-class filter drops them afterwards. When any
+        class lacks an explicit threshold, the fallback is genuinely
+        needed for that class, so it stays in the minimum. With no
+        per-class thresholds at all this is just the fallback.
+        """
+        if self.conf_thresholds and set(self.conf_thresholds) >= set(
+            self.class_names
+        ):
+            return min(self.conf_thresholds.values())
+        return min([self.conf_threshold] + list(self.conf_thresholds.values()))
+
     def threshold_for(self, class_id: int) -> float:
         """The confidence threshold that applies to ``class_id``."""
         return self.conf_thresholds.get(class_id, self.conf_threshold)
@@ -179,6 +208,8 @@ class WeaponDetector:
 
         Allows callers (such as ``DemoRunner``) to reuse a warmed-up
         detector across runs when only the confidence thresholds change.
+        ``_predict_conf`` is recomputed under the same rule as in
+        ``__init__`` (see :meth:`_compute_predict_conf`).
         """
         if conf_threshold is not None:
             if not 0.0 < conf_threshold <= 1.0:
@@ -188,9 +219,7 @@ class WeaponDetector:
             self.conf_threshold = conf_threshold
         if conf_thresholds is not None:
             self.conf_thresholds = self._resolve_thresholds(conf_thresholds)
-        self._predict_conf = min(
-            [self.conf_threshold] + list(self.conf_thresholds.values())
-        )
+        self._predict_conf = self._compute_predict_conf()
 
     def warmup(self, *, tracker: Optional[str] = "bytetrack.yaml") -> None:
         """Run one dummy inference pass to trigger lazy model compilation.
@@ -231,8 +260,10 @@ class WeaponDetector:
         in the stock ``bytetrack.yaml``): a track survives 30 frames
         without a sighting, then gets a fresh ID if it reappears. The
         tracker's two-stage association adds nothing here — the detector
-        runs at conf 0.40, above the stock high threshold (0.25), so
-        every box reaching the tracker is already a first-stage
+        runs at ``_predict_conf`` (the lowest per-class threshold when
+        every class has one, otherwise the lowest of the fallback and
+        the per-class thresholds), above the stock high threshold (0.25),
+        so every box reaching the tracker is already a first-stage
         detection and the low-confidence second stage (0.10–0.25) has
         nothing to match. Call :meth:`reset_tracker` when the video
         source changes (new file, new camera) so stale tracks do not
@@ -245,9 +276,12 @@ class WeaponDetector:
             source=frame,
             persist=not self._tracker_reset_pending,
             tracker=tracker,
-            # Predict at the lowest threshold so no candidate above any
-            # per-class threshold is pre-filtered away; per-class
-            # filtering happens on the returned pairs below.
+            # Predict at _predict_conf (lowest threshold covering every
+            # class, fallback excluded when all classes have their own
+            # threshold) so no candidate above its per-class threshold
+            # is pre-filtered away and no sub-threshold box reaches
+            # ByteTrack; per-class filtering happens on the returned
+            # pairs below.
             conf=self._predict_conf,
             iou=self.iou_threshold,
             imgsz=self.imgsz,

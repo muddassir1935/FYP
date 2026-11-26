@@ -56,6 +56,11 @@ class FrameSource:
         # worker reports this in the detection log's run summary, so a
         # log can say how many frames the capture saw vs processed).
         self.frames_seen: int = 0
+        # Generations of the looped file: incremented on every
+        # successful rewind (``loop_file``). Consumers watch this to
+        # reset per-clip state (tracker, voter) when a clip restarts
+        # — otherwise end-of-clip tracks bleed into frame 1.
+        self.loop_generation: int = 0
         self._cap: Optional[object] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -190,6 +195,15 @@ class FrameSource:
                 if not ok or frame is None:
                     if self.loop_file and self._rewind(cv2):
                         continue
+                    # A file at EOF fails every read: retrying
+                    # max_consecutive_failures times first would
+                    # stall ~1 s (50 x 0.02 s) at every file end.
+                    # Short-circuit only the provable-EOF path; a
+                    # mid-stream failure is not at EOF, so genuine
+                    # transient failures still get their retries.
+                    if self._is_at_eof(cv2):
+                        self._end_reason = "eof"
+                        break
                     failures += 1
                     if failures >= self.max_consecutive_failures:
                         # A file that stops delivering frames at (or
@@ -243,4 +257,7 @@ class FrameSource:
         if isinstance(self.source, int):
             return False  # webcams do not rewind
         assert self._cap is not None
-        return bool(self._cap.set(cv2_module.CAP_PROP_POS_FRAMES, 0))
+        rewound = bool(self._cap.set(cv2_module.CAP_PROP_POS_FRAMES, 0))
+        if rewound:
+            self.loop_generation += 1
+        return rewound

@@ -172,7 +172,13 @@ def main() -> int:
     parser.add_argument("--source", required=True, help="Video clip path.")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0, help="0 = whole clip.")
-    parser.add_argument("--conf", type=float, default=0.40)
+    parser.add_argument("--conf", type=float, default=0.40,
+                        help="Flat confidence (both classes) when "
+                        "--conf-gun/--conf-knife are absent.")
+    parser.add_argument("--conf-gun", type=float, default=None,
+                        help="Gun confidence (overrides --conf for Gun).")
+    parser.add_argument("--conf-knife", type=float, default=None,
+                        help="Knife confidence (overrides --conf for Knife).")
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--min-hits", type=int, default=3, help="Tracker confirmation threshold.")
@@ -199,8 +205,17 @@ def main() -> int:
         print("opencv-python is not installed", file=sys.stderr)
         return 1
 
+    # Effective per-class thresholds: an explicit --conf-<class> wins,
+    # otherwise the flat --conf applies to that class (same convention
+    # as slice_eval.py and run_weapon_demo.py).
+    conf_gun = args.conf_gun if args.conf_gun is not None else args.conf
+    conf_knife = args.conf_knife if args.conf_knife is not None else args.conf
     detector = WeaponDetector(
-        args.weights, conf_threshold=args.conf, imgsz=args.imgsz, device=args.device
+        args.weights,
+        conf_threshold=args.conf,
+        conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
+        imgsz=args.imgsz,
+        device=args.device,
     )
 
     # ---- Pass A: detect() + 6-of-10 buffer --------------------------------
@@ -219,7 +234,8 @@ def main() -> int:
     buffer_seconds = time.monotonic() - t0
     n_frames = len(raw_by_frame)
     print(f"Clip: {args.source} — {n_frames} frames "
-          f"(start={args.start_frame}, conf={args.conf}, imgsz={args.imgsz})")
+          f"(start={args.start_frame}, conf Gun={conf_gun}, "
+          f"Knife={conf_knife}, imgsz={args.imgsz})")
 
     # ---- Pass B: track() + voter ------------------------------------------
     # The voter needs timestamps, and this script runs offline (faster
@@ -367,6 +383,8 @@ def main() -> int:
             "start_frame": args.start_frame,
             "frames": n_frames,
             "conf": args.conf,
+            "conf_gun": conf_gun,
+            "conf_knife": conf_knife,
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
             "confirm_window_s": args.confirm_window,
@@ -403,6 +421,8 @@ def main() -> int:
             "start_frame": args.start_frame,
             "frames": n_frames,
             "conf": args.conf,
+            "conf_gun": conf_gun,
+            "conf_knife": conf_knife,
             "imgsz": args.imgsz,
             "min_hits": args.min_hits,
             "confirm_window_s": args.confirm_window,
