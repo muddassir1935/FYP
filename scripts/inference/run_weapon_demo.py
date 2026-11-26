@@ -207,8 +207,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--device",
         default=None,
-        help="'cuda', 'cpu', 'xpu', or omit for auto: OpenVINO folders "
-        "auto-select the Intel GPU (xpu) when one is available.",
+        help="'cuda', 'cpu', 'intel:gpu', or omit for auto: OpenVINO folders "
+        "auto-select the Intel GPU (intel:gpu) when one is available.",
     )
     args = parser.parse_args()
     for name in ("conf", "conf_gun", "conf_knife"):
@@ -221,6 +221,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--confirm-window must be > 0")
     if args.confirm_min_span < 0:
         parser.error("--confirm-min-span must be >= 0")
+    if args.confirm_min_span > args.confirm_window:
+        parser.error(
+            "--confirm-min-span must be <= --confirm-window "
+            f"(got {args.confirm_min_span} > {args.confirm_window}); "
+            "a larger span makes confirmation impossible"
+        )
     if args.display_width < 1 or args.display_height < 1:
         parser.error("--display-width and --display-height must be positive")
     if args.imgsz < 32:

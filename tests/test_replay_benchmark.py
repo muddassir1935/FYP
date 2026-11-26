@@ -15,6 +15,7 @@ Run from the repo root:  python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tempfile
@@ -44,6 +45,7 @@ from scripts.evaluation.replay_benchmark import (
     score_intervals,
     score_labeled_frames,
     score_negative_clip,
+    validate_args,
     weights_fingerprint,
     write_events_csv,
 )
@@ -406,9 +408,9 @@ class TestResolveDevice(unittest.TestCase):
             model = Path(tmp) / "weapon_openvino_model"
             model.mkdir()
             with patch.object(
-                harness, "detect_openvino_device", return_value="xpu"
+                harness, "detect_openvino_device", return_value="intel:gpu"
             ) as detector:
-                self.assertEqual(resolve_device("auto", model), "xpu")
+                self.assertEqual(resolve_device("auto", model), "intel:gpu")
                 detector.assert_called_once_with(model)
 
 
@@ -445,6 +447,33 @@ class TestArgDefaults(unittest.TestCase):
             build_parser().parse_args(
                 ["--video", "clip.mp4", "--scene-seen-in-training", "maybe"]
             )
+
+
+class TestValidateArgs(unittest.TestCase):
+    def _args(self, **overrides) -> argparse.Namespace:
+        args = build_parser().parse_args(["--video", "clip.mp4"])
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_span_above_window_rejected(self) -> None:
+        # A span larger than the window makes confirmation impossible:
+        # the voter prunes hits older than the window before computing
+        # the span, so the span can never reach the minimum.
+        for window, span in ((1.0, 1.5), (0.5, 0.6), (2.0, 2.1)):
+            error = validate_args(
+                self._args(confirm_window=window, confirm_min_span=span)
+            )
+            self.assertIsNotNone(error)
+            self.assertIn("confirm-min-span", error)
+
+    def test_span_equal_to_window_accepted(self) -> None:
+        self.assertIsNone(
+            validate_args(self._args(confirm_window=1.0, confirm_min_span=1.0))
+        )
+
+    def test_defaults_validate(self) -> None:
+        self.assertIsNone(validate_args(self._args()))
 
 
 class TestEventsCsv(unittest.TestCase):

@@ -183,7 +183,7 @@ def main() -> int:
         "  python scripts/inference/run_weapon_demo.py "
         f"--weights {exported} --imgsz {args.imgsz} --source demo.mp4"
     )
-    print("(On recent ultralytics versions, --device xpu selects the Intel iGPU explicitly.)")
+    print("(Use --device intel:gpu to select the Intel iGPU explicitly.)")
     return 0
 
 

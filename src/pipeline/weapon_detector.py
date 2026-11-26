@@ -58,13 +58,22 @@ class Detection:
 
 
 def detect_openvino_device(weights_path: Union[str, Path]) -> Optional[str]:
-    """Select ``"xpu"`` for OpenVINO folders when an Intel GPU is
-    available, leaving PyTorch (.pt) and CPU-only machines untouched.
+    """Select ``"intel:gpu"`` for OpenVINO folders when an Intel GPU
+    is available, leaving PyTorch (.pt) and CPU-only machines untouched.
 
     Shared by the web UI runner and the CLI demo so both pick the same
-    device for the same weights. ``"xpu"`` is the PyTorch-style name
-    ultralytics accepts since 8.4.210; the older ``"intel:gpu"`` alias
-    is deprecated in the pinned 8.4.215 and emits a warning per run.
+    device for the same weights. ``"intel:gpu"`` is the name
+    ultralytics' OpenVINO backend accepts; it was verified live on the
+    Windows demo laptop (ultralytics 8.4.208, torch 2.15.0+cpu,
+    openvino 2026.4.1, Iris Xe). Do NOT switch to ``"xpu"``: it is a
+    PyTorch device name, and ``select_device("xpu")`` raises
+    ``ValueError`` because ``torch.xpu`` is unavailable on the pinned
+    ``torch==2.15.0+cpu`` — that crashed every ``--device auto`` run.
+    Do NOT upgrade ultralytics to the pinned 8.4.215 either: on 8.4.215
+    ``select_device("intel:gpu")`` also raises (``AutoBackend`` calls
+    ``select_device`` unconditionally before any backend is chosen),
+    so the OpenVINO GPU path is unusable there until verified — the
+    8.4.215 upgrade is BLOCKED pending that verification.
     """
     weights_path = Path(weights_path)
     if not weights_path.is_dir():
@@ -74,7 +83,7 @@ def detect_openvino_device(weights_path: Union[str, Path]) -> Optional[str]:
 
         devices = ov.Core().available_devices
         if any(d.startswith("GPU") for d in devices):
-            return "xpu"
+            return "intel:gpu"
     except Exception:
         pass
     return None
@@ -87,7 +96,7 @@ class WeaponDetector:
     ``weapon_yolov8s_baseline_20261108_1837_best.pt`` — see
     ``docs/training_run_log.md``) or to an exported OpenVINO model folder
     (``scripts/training/export_openvino.py``). ``device``: ``"cuda"`` /
-    ``"cpu"`` / ``"xpu"`` (OpenVINO models on an Intel GPU) or None for
+    ``"cpu"`` / ``"intel:gpu"`` (OpenVINO models on an Intel GPU) or None for
     ultralytics' automatic choice.
 
     ``conf_threshold`` is the fallback threshold for any class without a

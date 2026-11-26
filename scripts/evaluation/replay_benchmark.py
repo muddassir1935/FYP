@@ -21,7 +21,7 @@ when the video reports one, else after EOF) or the run FAILS LOUDLY
 Otherwise the frame timestamp is ``frame_index / fps`` from the video.
 
 Weights may be a ``.pt`` file or an OpenVINO model folder; ``--device
-auto`` selects the OpenVINO Intel GPU (``"xpu"``) for model folders
+auto`` selects the OpenVINO Intel GPU (``"intel:gpu"``) for model folders
 when one is available.
 
 Confirmed detections merge into ALARM EVENTS: same class, gap <=
@@ -167,7 +167,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--imgsz", type=int, default=DEFAULT_IMGSZ)
     parser.add_argument(
         "--device", default="auto",
-        help="'cuda', 'cpu', 'xpu', or 'auto' (default) for ultralytics' choice.",
+        help="'cuda', 'cpu', 'intel:gpu', or 'auto' (default) for ultralytics' choice.",
     )
     parser.add_argument(
         "--output", default=None,
@@ -202,6 +202,12 @@ def validate_args(args: argparse.Namespace) -> Optional[str]:
         return f"--confirm-window must be > 0, got {args.confirm_window}"
     if args.confirm_min_span < 0:
         return f"--confirm-min-span must be >= 0, got {args.confirm_min_span}"
+    if args.confirm_min_span > args.confirm_window:
+        return (
+            "--confirm-min-span must be <= --confirm-window "
+            f"(got {args.confirm_min_span} > {args.confirm_window}); "
+            "a larger span makes confirmation impossible"
+        )
     if args.cooldown_s < 0:
         return f"--cooldown-s must be >= 0, got {args.cooldown_s}"
     if args.imgsz < 32:
@@ -365,7 +371,7 @@ def resolve_device(device_arg: str, weights_path: Path) -> Optional[str]:
     """Detector device for a replay run.
 
     An explicit ``--device`` wins. ``auto`` selects the OpenVINO Intel
-    GPU (``"xpu"``) for OpenVINO model folders when one is available
+    GPU (``"intel:gpu"``) for OpenVINO model folders when one is available
     and leaves everything else to ultralytics' choice (``None``) —
     the same selection the web UI runner and the CLI demo use.
     """
