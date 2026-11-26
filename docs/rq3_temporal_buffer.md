@@ -11,8 +11,9 @@ real-time threat detection?*
 > runs detection + ByteTrack tracking + class voting, and
 > `scripts/inference/run_weapon_demo.py` confirms only while a track
 > has `--min-hits` sightings (default 3) within the last
-> `--confirm-window` seconds (default 1.0 s), lapsing when the density
-> drops. The 98.1% / 92% figures below
+> `--confirm-window` seconds (default 1.0 s) AND the oldest in-window
+> sighting is at least `--confirm-min-span` old (default 0.4 s),
+> lapsing when the density drops. The 98.1% / 92% figures below
 > therefore describe the 6-of-10 buffer on combat footage — they must not
 > be quoted next to demo results. This is a large part of why RQ3 says 92%
 > confirmed-alarm precision while the v4 live field test says 18.5%: they

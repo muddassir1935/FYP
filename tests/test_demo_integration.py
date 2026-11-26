@@ -16,6 +16,7 @@ Run from the repo root:  python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import time
@@ -246,6 +247,35 @@ class TestRealRuns(RealRunTestCase):
         assert stopped.saved_video is not None
         self.assertFalse(stopped.saved_video.endswith("_raw.mp4"))
         self.assertTrue(Path(stopped.saved_video).is_file())
+
+    def test_save_video_writes_timestamp_sidecar(self) -> None:
+        # One sidecar line per recorded frame, frame_index 1..N in
+        # order with strictly increasing monotonic timestamps — the
+        # join key for the detection log (frame_index) and true timing.
+        make_tiny_video(self.videos / "clip.mp4", n_frames=20, fps=10)
+        self._start(FakeDetector(), save_video=True)
+        self.assertTrue(
+            _wait_for(lambda: self.runner.state == "stopped"),
+            f"run never stopped: {self.runner.status()}",
+        )
+        stopped = self.runner.status()
+        self.assertEqual(stopped.frames, 20)
+        self.assertIsNotNone(stopped.saved_video)
+        assert stopped.saved_video is not None
+        sidecar_path = Path(f"{stopped.saved_video}.timestamps.jsonl")
+        self.assertTrue(sidecar_path.is_file())
+        lines = [
+            json.loads(line)
+            for line in sidecar_path.read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(lines), 20)
+        self.assertEqual(
+            [line["frame_index"] for line in lines],
+            list(range(1, 21)),
+        )
+        ts = [line["ts"] for line in lines]
+        self.assertTrue(all(b > a for a, b in zip(ts, ts[1:])))
 
 
 @unittest.skipUnless(
@@ -577,7 +607,10 @@ class TestInferenceWorker(unittest.TestCase):
         worker = InferenceWorker(
             stream,
             detector,
-            voter or TrackClassVoter(min_hits=1),
+            # min_span_s=0: these tests exercise snapshot saving, not
+            # the span rule — confirmation must happen on the first
+            # sighting, and the fake frames are milliseconds apart.
+            voter or TrackClassVoter(min_hits=1, min_span_s=0),
             cv2_module=cv2 or _FakeCv2Draw(),
             tracker="bytetrack.yaml",
             snapshots_dir=self.snaps,

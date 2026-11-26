@@ -1,9 +1,11 @@
 """Unit tests for track-level class voting (pure Python, no torch).
 
-Confirmation is density over time: >= min_hits sightings within the
-last confirm_window_s seconds (default 3 in 1.0 s), lapsing when the
-density drops. Every update() call therefore passes an explicit
-monotonic timestamp, so the tests are deterministic.
+Confirmation is density over time plus a minimum span: >= min_hits
+sightings within the last confirm_window_s seconds (default 3 in
+1.0 s) AND the oldest in-window sighting at least min_span_s old
+(default 0.4 s), lapsing when the density drops. Every update() call
+therefore passes an explicit monotonic timestamp, so the tests are
+deterministic.
 
 Run from the repo root:  python -m unittest discover -s tests -v
 """
@@ -37,12 +39,15 @@ def det(class_id: int = GUN, conf: float = 0.9, bbox=BOX) -> Detection:
 class TestConfirmation(unittest.TestCase):
     def test_confirms_on_third_sighting_not_before(self) -> None:
         voter = TrackClassVoter(min_hits=3)
-        for i in range(2):
-            out = voter.update([(1, det())], now=0.1 * i)
+        # Sightings at 0.0 s and 0.2 s: dense, but the span (0.2 s) is
+        # under min_span_s (0.4 s), so neither confirms.
+        for i, t in enumerate((0.0, 0.2)):
+            out = voter.update([(1, det())], now=t)
             self.assertEqual(len(out), 1)
-            self.assertFalse(out[0].confirmed, f"frame {i + 1}")
+            self.assertFalse(out[0].confirmed, f"sighting {i + 1}")
             self.assertEqual(out[0].hits, i + 1)
-        out = voter.update([(1, det())], now=0.2)
+        # Third sighting at 0.4 s: 3 hits spanning exactly 0.4 s.
+        out = voter.update([(1, det())], now=0.4)
         self.assertTrue(out[0].confirmed)
         self.assertEqual(out[0].hits, 3)
         self.assertEqual(out[0].track_id, 1)
@@ -54,12 +59,13 @@ class TestConfirmation(unittest.TestCase):
         self.assertFalse(out[0].confirmed)
 
     def test_three_frame_glimpse_confirms(self) -> None:
-        # A brief true detection (3 frames, dense in time) confirms
+        # A brief true detection (3 sightings spanning 0.4 s) confirms
         # under tracking, where the 6-of-10 buffer would have dropped it.
+        # A denser burst inside 0.4 s would NOT confirm — see TestMinSpan.
         voter = TrackClassVoter(min_hits=3)
-        for i in range(2):
-            voter.update([(7, det(KNIFE, 0.8))], now=0.1 * i)
-        out = voter.update([(7, det(KNIFE, 0.8))], now=0.2)
+        for t in (0.0, 0.2):
+            voter.update([(7, det(KNIFE, 0.8))], now=t)
+        out = voter.update([(7, det(KNIFE, 0.8))], now=0.4)
         self.assertTrue(out[0].confirmed)
         self.assertEqual(out[0].detection.class_name, "Knife")
 
@@ -88,12 +94,12 @@ class TestDensityConfirmation(unittest.TestCase):
 
     def test_confirmation_lapses_after_silence(self) -> None:
         voter = TrackClassVoter(min_hits=3, confirm_window_s=1.0)
-        for i in range(3):
-            out = voter.update([(1, det())], now=0.1 * i)
+        for t in (0.0, 0.25, 0.5):
+            out = voter.update([(1, det())], now=t)
         self.assertTrue(out[0].confirmed)
-        # At t=1.1 only the 0.1 s and 0.2 s sightings are still
-        # in-window (the 0.0 s one aged out): density dropped to 2.
-        out = voter.update([(1, det())], now=1.1)
+        # At t=1.3 the 0.0 s and 0.25 s sightings aged out of the
+        # 1.0 s window: only 0.5 s and 1.3 s remain, density dropped to 2.
+        out = voter.update([(1, det())], now=1.3)
         self.assertFalse(out[0].confirmed)
         self.assertEqual(out[0].hits, 2)
         # After a longer silence only the fresh sighting counts.
@@ -105,13 +111,65 @@ class TestDensityConfirmation(unittest.TestCase):
         # Track 1 is seen densely (confirms); track 2 sparsely (never).
         voter = TrackClassVoter(min_hits=3, confirm_window_s=1.0)
         voter.update([(1, det(GUN)), (2, det(KNIFE))], now=0.0)
-        voter.update([(1, det(GUN))], now=0.1)
-        out = voter.update([(1, det(GUN)), (2, det(KNIFE))], now=0.2)
+        voter.update([(1, det(GUN))], now=0.2)
+        out = voter.update([(1, det(GUN)), (2, det(KNIFE))], now=0.4)
         by_id = {t.track_id: t for t in out}
         self.assertTrue(by_id[1].confirmed)
         self.assertEqual(by_id[1].hits, 3)
         self.assertFalse(by_id[2].confirmed)
         self.assertEqual(by_id[2].hits, 2)
+
+
+class TestMinSpan(unittest.TestCase):
+    """The span rule: confirmation needs observed presence, not just density."""
+
+    def test_three_sightings_inside_span_do_not_confirm(self) -> None:
+        # 3 sightings in 0.2 s: dense, but the object was only visibly
+        # present for 0.2 s — a phone sweeping through frame.
+        voter = TrackClassVoter(min_hits=3, min_span_s=0.4)
+        for t in (0.0, 0.1, 0.2):
+            out = voter.update([(1, det())], now=t)
+        self.assertEqual(out[0].hits, 3)
+        self.assertFalse(out[0].confirmed)
+
+    def test_three_sightings_spanning_min_span_confirm(self) -> None:
+        voter = TrackClassVoter(min_hits=3, min_span_s=0.4)
+        for t in (0.0, 0.2, 0.4):
+            out = voter.update([(1, det())], now=t)
+        self.assertTrue(out[0].confirmed)
+        self.assertEqual(out[0].hits, 3)
+
+    def test_gap_inside_span_is_tolerated(self) -> None:
+        # Sightings at 0.0, 0.1, then 0.5: a 0.4 s gap in the middle,
+        # but the span (0.5 s) clears the floor — near-threshold
+        # flicker must not drop a real detection.
+        voter = TrackClassVoter(min_hits=3, min_span_s=0.4)
+        for t in (0.0, 0.1, 0.5):
+            out = voter.update([(1, det())], now=t)
+        self.assertTrue(out[0].confirmed)
+
+    def test_span_measured_from_oldest_in_window_sighting(self) -> None:
+        # 0.0, 0.1, 0.2 do not confirm; one more sighting at 0.45
+        # makes the span 0.45 s — the oldest sighting counts, not the
+        # most recent three.
+        voter = TrackClassVoter(min_hits=3, min_span_s=0.4)
+        for t in (0.0, 0.1, 0.2):
+            out = voter.update([(1, det())], now=t)
+        self.assertFalse(out[0].confirmed)
+        out = voter.update([(1, det())], now=0.45)
+        self.assertTrue(out[0].confirmed)
+        self.assertEqual(out[0].hits, 4)
+
+    def test_min_span_zero_disables_span_check(self) -> None:
+        # The pre-span rule: density alone confirms.
+        voter = TrackClassVoter(min_hits=3, min_span_s=0)
+        for t in (0.0, 0.1, 0.2):
+            out = voter.update([(1, det())], now=t)
+        self.assertTrue(out[0].confirmed)
+
+    def test_negative_min_span_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            TrackClassVoter(min_span_s=-0.1)
 
 
 class TestVoting(unittest.TestCase):
@@ -148,7 +206,9 @@ class TestVoting(unittest.TestCase):
     def test_tracks_vote_independently(self) -> None:
         voter = TrackClassVoter(min_hits=2)
         voter.update([(1, det(GUN, 0.9)), (2, det(KNIFE, 0.9))], now=0.0)
-        out = voter.update([(1, det(GUN, 0.9)), (2, det(KNIFE, 0.9))], now=0.1)
+        # The second sighting is 0.5 s later, so the 0.4 s span passes
+        # and both tracks confirm (at 0.1 s they would not).
+        out = voter.update([(1, det(GUN, 0.9)), (2, det(KNIFE, 0.9))], now=0.5)
         by_id = {t.track_id: t for t in out}
         self.assertEqual(by_id[1].detection.class_id, GUN)
         self.assertEqual(by_id[2].detection.class_id, KNIFE)
@@ -194,6 +254,8 @@ class TestLifecycle(unittest.TestCase):
             TrackClassVoter(confirm_window_s=0)
         with self.assertRaises(ValueError):
             TrackClassVoter(confirm_window_s=-1.0)
+        with self.assertRaises(ValueError):
+            TrackClassVoter(min_span_s=-0.1)
 
 
 if __name__ == "__main__":

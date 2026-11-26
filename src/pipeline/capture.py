@@ -52,6 +52,10 @@ class FrameSource:
         self.pace_file = pace_file
         self.max_consecutive_failures = max_consecutive_failures
         self.source_fps: float = 0.0  # native FPS of a file source (0 = n/a)
+        # Frames successfully read from the source (the inference
+        # worker reports this in the detection log's run summary, so a
+        # log can say how many frames the capture saw vs processed).
+        self.frames_seen: int = 0
         self._cap: Optional[object] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -202,6 +206,7 @@ class FrameSource:
                     continue
                 failures = 0
                 index += 1
+                self.frames_seen += 1
                 with self._lock:
                     self._latest = (index, time.monotonic(), frame)
                 # A file would otherwise be decoded as fast as the CPU allows;

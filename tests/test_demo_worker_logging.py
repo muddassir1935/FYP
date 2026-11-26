@@ -80,10 +80,13 @@ class FakeStream:
         self._frame = frame
         self._i = 0
         self.ended = False
+        # Mirrors FrameSource.frames_seen (counted per successful read).
+        self.frames_seen = 0
 
     def read(self):
         if self._i < self._n:
             self._i += 1
+            self.frames_seen += 1
             return (self._i, time.monotonic() + 0.05 * self._i, self._frame)
         self.ended = True
         return None
@@ -117,6 +120,8 @@ class LoggingTestCase(unittest.TestCase):
         voter: TrackClassVoter | None = None,
         log_dir: Path | None = _UNSET,  # type: ignore[assignment]
         snapshots_dir: Path | None = _UNSET,  # type: ignore[assignment]
+        source: str | None = None,
+        recording: str | None = None,
     ) -> InferenceWorker:
         stream = FakeStream(n_frames, self.frame)
         worker = InferenceWorker(
@@ -127,6 +132,8 @@ class LoggingTestCase(unittest.TestCase):
             tracker="bytetrack.yaml",
             snapshots_dir=self.snaps if snapshots_dir is _UNSET else snapshots_dir,
             log_dir=self.logs if log_dir is _UNSET else log_dir,
+            source=source,
+            recording=recording,
         )
         worker.start()
         worker.join(timeout=10)
@@ -160,21 +167,91 @@ class LoggingTestCase(unittest.TestCase):
         )
         self.assertEqual(header["min_hits"], 3)
         self.assertEqual(header["confirm_window_s"], 1.0)
+        self.assertEqual(header["min_span_s"], 0.4)
         self.assertEqual(header["tracker"], "bytetrack.yaml")
+        self.assertIsNone(header["source"])
+        self.assertIsNone(header["recording"])
         self.assertIn("started_at", header)
+
+    def test_header_carries_source_and_recording(self) -> None:
+        detector = FakeDetector(self.weights, script=[[_det(0, 1)]])
+        worker = self._run_worker(
+            detector,
+            n_frames=1,
+            source="clip.mp4",
+            recording="/tmp/rec/demo_20261126_160000_raw.mp4",
+        )
+        self.assertIsNone(worker.error)
+        lines = self._read_lines(worker)
+        header = lines[0]
+        self.assertEqual(header["source"], "clip.mp4")
+        self.assertEqual(
+            header["recording"], "/tmp/rec/demo_20261126_160000_raw.mp4"
+        )
+
+    def test_footer_written_with_correct_counts(self) -> None:
+        detector = FakeDetector(
+            self.weights,
+            script=[[_det(0, 1)], [_det(0, 1)], [_det(0, 1)]],
+        )
+        worker = self._run_worker(detector, n_frames=3)
+        self.assertIsNone(worker.error)
+        lines = self._read_lines(worker)
+        # Header + 3 detections + closing run summary.
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(lines[0]["type"], "header")
+        footer = lines[-1]
+        self.assertEqual(footer["type"], "run_summary")
+        self.assertEqual(footer["frames_processed"], 3)
+        self.assertEqual(footer["frames_seen_by_capture"], 3)
+        self.assertEqual(footer["started_at"], lines[0]["started_at"])
+        self.assertIn("ended_at", footer)
+        self.assertGreaterEqual(footer["duration_s"], 0)
+
+    def test_footer_zero_counts_when_worker_never_started(self) -> None:
+        # stop() on a never-started worker closes the log: the footer
+        # is still written (a run that never started processed 0 frames).
+        stream = FakeStream(0, self.frame)
+        worker = InferenceWorker(
+            stream,
+            FakeDetector(self.weights, script=[]),
+            TrackClassVoter(min_hits=3),
+            cv2_module=MagicMock(),
+            tracker="bytetrack.yaml",
+            snapshots_dir=self.snaps,
+            log_dir=self.logs,
+        )
+        worker.stop()
+        assert worker.log_path is not None
+        lines = [
+            json.loads(line)
+            for line in worker.log_path.read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(lines), 2)
+        footer = lines[-1]
+        self.assertEqual(footer["type"], "run_summary")
+        self.assertEqual(footer["frames_processed"], 0)
+        self.assertEqual(footer["frames_seen_by_capture"], 0)
 
     def test_one_line_per_detection_with_fields(self) -> None:
         detector = FakeDetector(
             self.weights,
             script=[[_det(0, 1)], [_det(0, 1), _det(1, 2, conf=0.8)]],
         )
+        # min_span_s=0: this test checks the detection lines, not the
+        # span rule — with the default 0.4 s span the 0.05 s-apart
+        # fake frames would never confirm.
         worker = self._run_worker(
-            detector, voter=TrackClassVoter(min_hits=1), snapshots_dir=None
+            detector,
+            voter=TrackClassVoter(min_hits=1, min_span_s=0),
+            snapshots_dir=None,
         )
         self.assertIsNone(worker.error)
         lines = self._read_lines(worker)
         self.assertEqual(lines[0]["type"], "header")
-        dets = lines[1:]
+        self.assertEqual(lines[-1]["type"], "run_summary")
+        dets = lines[1:-1]
         self.assertEqual(len(dets), 3)  # 1 on frame 1, 2 on frame 2
         self.assertEqual([d["frame_index"] for d in dets], [1, 2, 2])
         self.assertEqual([d["track_id"] for d in dets], [1, 1, 2])
@@ -199,10 +276,13 @@ class LoggingTestCase(unittest.TestCase):
         worker = self._run_worker(detector)  # min_hits=3, only 2 sightings
         self.assertIsNone(worker.error)
         lines = self._read_lines(worker)
-        self.assertEqual(len(lines), 3)  # header + 2 detections
-        self.assertTrue(all(d["confirmed"] is False for d in lines[1:]))
+        self.assertEqual(len(lines), 4)  # header + 2 detections + footer
+        self.assertEqual(lines[-1]["type"], "run_summary")
+        self.assertTrue(all(d["confirmed"] is False for d in lines[1:-1]))
 
-    def test_openvino_folder_header_hashes_xml(self) -> None:
+    def test_openvino_folder_header_hashes_bin_and_xml(self) -> None:
+        # The .bin (weight VALUES) identifies the model; the .xml only
+        # describes structure, so weights_sha256 is now the .bin hash.
         ov_dir = Path(self._tmp.name) / "v3_openvino_model"
         ov_dir.mkdir()
         xml = ov_dir / "v3.xml"
@@ -221,13 +301,17 @@ class LoggingTestCase(unittest.TestCase):
         finally:
             log.close()
         self.assertEqual(
-            header["weights_sha256"], hashlib.sha256(b"<net/>").hexdigest()
+            header["weights_sha256"],
+            hashlib.sha256(b"binary weights").hexdigest(),
+        )
+        self.assertEqual(
+            header["weights_xml_sha256"], hashlib.sha256(b"<net/>").hexdigest()
         )
         assert header["weights_note"] is not None
-        self.assertIn("hashed v3.xml", header["weights_note"])
+        self.assertIn("hashed v3.bin", header["weights_note"])
         self.assertEqual(header["model_label"], "v3")
 
-    def test_openvino_folder_without_xml_records_null_hash(self) -> None:
+    def test_openvino_folder_without_xml_hashes_bin(self) -> None:
         ov_dir = Path(self._tmp.name) / "empty_openvino_model"
         ov_dir.mkdir()
         (ov_dir / "model.bin").write_bytes(b"binary weights")
@@ -243,9 +327,39 @@ class LoggingTestCase(unittest.TestCase):
             header = json.loads(log.path.read_text().splitlines()[0])
         finally:
             log.close()
-        self.assertIsNone(header["weights_sha256"])
+        # The .bin alone still identifies the model (no .xml needed).
+        self.assertEqual(
+            header["weights_sha256"],
+            hashlib.sha256(b"binary weights").hexdigest(),
+        )
+        self.assertIsNone(header["weights_xml_sha256"])
         assert header["weights_note"] is not None
         self.assertIn("no .xml", header["weights_note"])
+
+    def test_openvino_folder_without_bin_hashes_xml_only(self) -> None:
+        ov_dir = Path(self._tmp.name) / "xml_only_openvino_model"
+        ov_dir.mkdir()
+        (ov_dir / "v3.xml").write_bytes(b"<net/>")
+        detector = FakeDetector(ov_dir, script=[])
+        log = _DetectionLog(
+            self.logs,
+            detector=detector,
+            voter=TrackClassVoter(),
+            tracker="bytetrack.yaml",
+        )
+        try:
+            assert log.path is not None
+            header = json.loads(log.path.read_text().splitlines()[0])
+        finally:
+            log.close()
+        # No .bin: the model is NOT identified (weights_sha256 null),
+        # but the .xml hash is still recorded.
+        self.assertIsNone(header["weights_sha256"])
+        self.assertEqual(
+            header["weights_xml_sha256"], hashlib.sha256(b"<net/>").hexdigest()
+        )
+        assert header["weights_note"] is not None
+        self.assertIn("no .bin", header["weights_note"])
 
     def test_detector_without_weights_attrs_records_nulls(self) -> None:
         detector = FakeDetectorNoAttrs(script=[[_det(0, 1)]])
@@ -260,7 +374,9 @@ class LoggingTestCase(unittest.TestCase):
         self.assertIsNone(header["model_label"])
         self.assertIsNone(header["conf_threshold"])
         self.assertIsNone(header["conf_thresholds"])
-        self.assertEqual(len(lines), 2)  # header + 1 detection
+        # header + 1 detection + footer
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(lines[-1]["type"], "run_summary")
 
     def test_log_dir_none_disables_logging(self) -> None:
         detector = FakeDetector(

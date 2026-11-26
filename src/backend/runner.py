@@ -30,6 +30,7 @@ from src.pipeline import (
     FrameSource,
     InferenceWorker,
     RollingFps,
+    TimestampSidecar,
     TrackClassVoter,
     WeaponDetector,
     detect_openvino_device,
@@ -63,6 +64,9 @@ class RunConfig:
     imgsz: int = 640
     min_hits: int = 3
     confirm_window_s: float = 1.0
+    # Minimum observed presence for confirmation (see TrackClassVoter):
+    # a burst of sightings inside this span never confirms.
+    confirm_min_span_s: float = 0.4
     tracker: str = "bytetrack.yaml"
     loop: bool = False
     hide_unconfirmed: bool = False
@@ -140,6 +144,9 @@ class DemoRunner:
         self._display_thread: threading.Thread | None = None
         self._worker: InferenceWorker | None = None
         self._stream: FrameSource | None = None
+        # Recording filename fixed in start() (see below) so the
+        # worker's log header can name the recording.
+        self._planned_recording_path: str | None = None
         # Warmed-up detector cache keyed by (resolved_weights_path, imgsz, device).
         # Avoids recompiling OpenVINO/CUDA graphs on every consecutive run.
         self._cached_detector_key: tuple[Path, int, str | None] | None = None
@@ -167,6 +174,7 @@ class DemoRunner:
             self._latest_error_logged = False
             self._cancel_start.clear()
             self._saved_video = None
+            self._planned_recording_path = None
             self._snapshots_at_start = len(self.list_snapshots())
             self._latest_jpeg = None
             self._frame_seq = 0
@@ -202,8 +210,22 @@ class DemoRunner:
             ) from exc
 
         voter = TrackClassVoter(
-            min_hits=config.min_hits, confirm_window_s=config.confirm_window_s
+            min_hits=config.min_hits,
+            confirm_window_s=config.confirm_window_s,
+            min_span_s=config.confirm_min_span_s,
         )
+        # The recording filename is fixed up front — not when the first
+        # frame is recorded — so the worker's log header can name it.
+        # (A stamp collision across runs in the same second keeps the
+        # old behaviour: the later run overwrites.)
+        planned_recording: str | None = None
+        if config.save_video and self.save_video_dir is not None:
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            suffix = "_raw" if config.record_raw else ""
+            planned_recording = str(
+                self.save_video_dir / f"demo_{stamp}{suffix}.mp4"
+            )
+        self._planned_recording_path = planned_recording
         stream = FrameSource(source, loop_file=config.loop)
         try:
             stream.start()
@@ -230,6 +252,12 @@ class DemoRunner:
             cv2_module=cv2,
             tracker=config.tracker,
             snapshots_dir=self.snapshots_dir,
+            # Header provenance: the video/webcam name + the planned
+            # recording filename. When the writer cannot be opened the
+            # header still names the planned file (the display loop
+            # warns loudly in that case) — the file simply never appears.
+            source=self._source_label(config),
+            recording=planned_recording,
         )
         with self._lock:
             self._stream = stream
@@ -264,10 +292,12 @@ class DemoRunner:
             raise RuntimeError(f"Could not start the run threads: {exc}") from exc
         logger.info(
             "run started: source=%s (%s) weights=%s conf Gun=%.2f Knife=%.2f "
-            "imgsz=%d min_hits=%d confirm_window=%.1fs save_video=%s record_raw=%s",
+            "imgsz=%d min_hits=%d confirm_window=%.1fs confirm_min_span=%.1fs "
+            "save_video=%s record_raw=%s",
             config.source, config.source_type, config.weights_id,
             config.conf_gun, config.conf_knife, config.imgsz,
-            config.min_hits, config.confirm_window_s, config.save_video, config.record_raw,
+            config.min_hits, config.confirm_window_s,
+            config.confirm_min_span_s, config.save_video, config.record_raw,
         )
         return self.status()
 
@@ -794,6 +824,7 @@ class DemoRunner:
         fps_counter = RollingFps()
         last_index = 0
         writer = None
+        sidecar: TimestampSidecar | None = None
         saved_video_path: str | None = None
         recording_failed = False
         try:
@@ -831,37 +862,58 @@ class DemoRunner:
                 ):
                     if writer is None:
                         self.save_video_dir.mkdir(parents=True, exist_ok=True)
-                        stamp = time.strftime("%Y%m%d_%H%M%S")
-                        suffix = "_raw" if config.record_raw else ""
-                        saved_video_path = str(
-                            self.save_video_dir / f"demo_{stamp}{suffix}.mp4"
-                        )
-                        height, width = display.shape[:2]
-                        writer = cv2_module.VideoWriter(
-                            saved_video_path,
-                            cv2_module.VideoWriter_fourcc(*"mp4v"),
-                            stream.source_fps or FALLBACK_FPS,
-                            (width, height),
-                        )
-                        if not writer.isOpened():
-                            writer.release()
-                            writer = None
-                            failed_path = saved_video_path
-                            saved_video_path = None
+                        # The path was fixed in start() so the worker's
+                        # log header can name the recording. If it is
+                        # somehow missing, disable recording loudly
+                        # instead of inventing a second filename.
+                        saved_video_path = self._planned_recording_path
+                        if saved_video_path is None:
                             recording_failed = True
                             warning = (
-                                "Could not open video recording "
-                                f"{failed_path!r}; recording disabled"
+                                "Recording enabled but no recording path "
+                                "was planned; recording disabled"
                             )
                             with self._lock:
                                 self._warning = warning
                             print(f"WARNING: {warning}")
                             logger.warning(warning)
+                        else:
+                            height, width = display.shape[:2]
+                            writer = cv2_module.VideoWriter(
+                                saved_video_path,
+                                cv2_module.VideoWriter_fourcc(*"mp4v"),
+                                stream.source_fps or FALLBACK_FPS,
+                                (width, height),
+                            )
+                            if not writer.isOpened():
+                                writer.release()
+                                writer = None
+                                failed_path = saved_video_path
+                                saved_video_path = None
+                                recording_failed = True
+                                warning = (
+                                    "Could not open video recording "
+                                    f"{failed_path!r}; recording disabled"
+                                )
+                                with self._lock:
+                                    self._warning = warning
+                                print(f"WARNING: {warning}")
+                                logger.warning(warning)
+                            else:
+                                # True timing for the recording: one
+                                # monotonic timestamp per recorded
+                                # frame (raw or annotated — the timing
+                                # problem is the same either way),
+                                # joining the detection log on
+                                # frame_index.
+                                sidecar = TimestampSidecar(saved_video_path)
                     if writer is not None:
                         # Raw frames by default (record_raw): the
                         # annotated recording is useless as training
                         # data for the next model version.
                         writer.write(frame if config.record_raw else display)
+                        if sidecar is not None:
+                            sidecar.write(frame_index, _ts)
                 ok, buf = cv2_module.imencode(
                     ".jpg", display, [cv2_module.IMWRITE_JPEG_QUALITY, 85]
                 )
@@ -874,6 +926,8 @@ class DemoRunner:
         finally:
             if writer is not None:
                 writer.release()
+            if sidecar is not None:
+                sidecar.close()
             with self._lock:
                 if saved_video_path is not None:
                     self._saved_video = saved_video_path

@@ -18,8 +18,19 @@ three sightings were never dense. The old rule (``hits >= min_hits`` on
 a lifetime counter) confirmed exactly that sparse pattern: two
 detections plus one more sighting anywhere inside the track's 30-frame
 life confirmed a threat without it ever being detected consistently.
-The voted label itself is still the confidence-weighted lifetime vote;
-only the confirmation rule changed.
+
+Density alone is still a frame count in a time window: at 39 FPS three
+sightings span ~0.1 s, so a phone sweeping through frame for four
+frames would confirm, and the rule gets weaker as the model gets
+faster. The ``min_span_s`` floor (default 0.4 s) fixes that: a track
+confirms only when its oldest in-window sighting is at least
+``min_span_s`` old, i.e. the object has been visibly present for that
+long. The rule is now a minimum observed presence in seconds, not a
+frame count — a faster model just samples the same 0.4 s more densely.
+Gaps inside the span are still tolerated (a sighting need only fall
+inside the window), so near-threshold flicker does not drop a real
+detection. The voted label itself is still the confidence-weighted
+lifetime vote; only the confirmation rule changed.
 
 Note ByteTrack itself only shows a track after detections in 2
 consecutive frames (a tentative track unmatched in the very next frame
@@ -51,7 +62,8 @@ class TrackedDetection:
     hits: int  # sightings of this track within the confirmation window
     vote_share: float  # weighted vote share of the winning class (0.0-1.0)
     raw_class_id: int  # class the model gave this frame, before voting
-    confirmed: bool  # >= min_hits sightings within the confirmation window
+    confirmed: bool  # >= min_hits sightings within the window, spanning
+    # >= min_span_s (see TrackClassVoter)
 
 
 @dataclass
@@ -67,16 +79,25 @@ class TrackClassVoter:
     """Assigns one stable, voted label per ByteTrack track."""
 
     def __init__(
-        self, *, min_hits: int = 3, confirm_window_s: float = 1.0, max_age: int = 30
+        self,
+        *,
+        min_hits: int = 3,
+        confirm_window_s: float = 1.0,
+        min_span_s: float = 0.4,
+        max_age: int = 30,
     ) -> None:
         if min_hits < 1:
             raise ValueError("min_hits must be >= 1")
         if confirm_window_s <= 0:
             raise ValueError("confirm_window_s must be > 0")
+        if min_span_s < 0:
+            raise ValueError("min_span_s must be >= 0")
         if max_age < 1:
             raise ValueError("max_age must be >= 1")
         self.min_hits = min_hits
         self.confirm_window_s = confirm_window_s
+        # 0 disables the span check (density only, the pre-span rule).
+        self.min_span_s = min_span_s
         self.max_age = max_age
         self._tracks: Dict[int, _TrackVotes] = {}
         self._names: Dict[int, str] = {}  # class_id -> class_name, as seen
@@ -104,7 +125,11 @@ class TrackClassVoter:
         only sightings within the last ``confirm_window_s`` seconds
         (a sighting exactly ``confirm_window_s`` old still counts);
         ``confirmed`` is True only while that count reaches
-        ``min_hits``, so confirmation lapses after silence.
+        ``min_hits`` AND the oldest in-window sighting is at least
+        ``min_span_s`` old (span = ``now - hit_times[0]`` after
+        pruning), so confirmation lapses after silence — and a burst
+        of sightings inside ``min_span_s`` never confirms, however
+        dense it is.
         """
         self._frame += 1
         visible: List[TrackedDetection] = []
@@ -125,6 +150,12 @@ class TrackClassVoter:
             while state.hit_times and state.hit_times[0] < cutoff:
                 state.hit_times.popleft()
             hits = len(state.hit_times)
+            # Minimum observed presence: the oldest surviving sighting
+            # must be at least min_span_s old. A burst of sightings
+            # inside the span (e.g. 3 frames at 39 FPS) has hits but
+            # no span, so it never confirms.
+            span_s = now - state.hit_times[0] if state.hit_times else 0.0
+            confirmed = hits >= self.min_hits and span_s >= self.min_span_s
             state.last_seen = self._frame
             state.last_class_id = det.class_id
 
@@ -147,7 +178,7 @@ class TrackClassVoter:
                     hits=hits,
                     vote_share=vote_share,
                     raw_class_id=det.class_id,
-                    confirmed=hits >= self.min_hits,
+                    confirmed=confirmed,
                 )
             )
 
