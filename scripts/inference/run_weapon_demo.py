@@ -13,12 +13,12 @@ keeps a track alive through weak detections, so brief true glimpses are
 not lost. The track voter then assigns ONE stable label per track (a
 confidence-weighted majority vote over the track's lifetime), so the
 same object no longer flip-flops between Gun and Knife. A track
-confirms after ``--min-hits`` visible sightings (default 3). ByteTrack
-itself only shows a track after detections in 2 consecutive frames, so
-in practice a threat confirms after 4 consecutive detections (against 6
-for the old buffer) and 1-3 frame blips never confirm. The old 6-of-10
-temporal buffer (``src/pipeline/temporal_buffer.py``) is kept intact
-for RQ3 reproducibility — the demo simply no longer uses it.
+confirms only while it has ``--min-hits`` sightings within the last
+``--confirm-window`` seconds (defaults 3 in 1.0 s), and confirmation
+lapses when the density drops — sparse sightings spread over a second
+never confirm. The old 6-of-10 temporal buffer
+(``src/pipeline/temporal_buffer.py``) is kept intact for RQ3
+reproducibility — the demo simply no longer uses it.
 
 Playback design: capture, display and inference run on separate threads.
 The display shows every frame at the source's own pace (video files are
@@ -39,9 +39,11 @@ Examples (from the repo root):
     python scripts/inference/run_weapon_demo.py --imgsz 416    # faster on CPU
     python scripts/inference/run_weapon_demo.py --conf-gun 0.60 --conf-knife 0.25
 
-Confidence thresholds: Gun is the false-positive-prone class, so it runs
-a higher threshold than Knife by default (val-tuned operating point, see
-``sentinel-dataset-v2/thresholds/operating_point.md``). ``--conf`` still
+Confidence thresholds: Gun runs a slightly higher threshold than Knife
+by default (0.44 vs 0.43 — val-tuned operating point for the v2 weights,
+see ``sentinel-dataset-v2/thresholds/operating_point.md``). That split
+is NOT from live behaviour: live, Knife is the leaky class (it fires on
+any elongated object) and Gun is recall-limited. ``--conf`` still
 works as a single threshold for all classes when given; ``--conf-gun`` /
 ``--conf-knife`` override it per class.
 
@@ -136,10 +138,17 @@ def parse_args() -> argparse.Namespace:
         "--min-hits",
         type=int,
         default=3,
-        help="Visible sightings of a track needed to confirm it (default 3 — "
-        "with ByteTrack's 2-frame activation gate this confirms after 4 "
-        "consecutive detections and recovers 4-5 frame glimpses the old "
-        "6-of-10 buffer dropped; 1-3 frame blips still never confirm).",
+        help="Sightings of a track needed to confirm it (default 3 — "
+        "counted only within the --confirm-window, so sparse "
+        "sightings spread over time never confirm).",
+    )
+    parser.add_argument(
+        "--confirm-window",
+        type=float,
+        default=1.0,
+        help="Seconds the --min-hits sightings must fall inside "
+        "(default 1.0). Confirmation lapses when the density drops "
+        "below --min-hits in this window.",
     )
     parser.add_argument(
         "--tracker",
@@ -185,6 +194,8 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be in (0, 1]")
     if args.min_hits < 1:
         parser.error("--min-hits must be >= 1")
+    if args.confirm_window <= 0:
+        parser.error("--confirm-window must be > 0")
     if args.display_width < 1 or args.display_height < 1:
         parser.error("--display-width and --display-height must be positive")
     if args.imgsz < 32:
@@ -292,7 +303,9 @@ def main() -> int:
     except Exception as exc:
         print(f"ERROR: model warmup failed: {exc}", file=sys.stderr)
         return 1
-    voter = TrackClassVoter(min_hits=args.min_hits)
+    voter = TrackClassVoter(
+        min_hits=args.min_hits, confirm_window_s=args.confirm_window
+    )
     source: int | str = int(args.source) if args.source.isdigit() else args.source
 
     snapshots_dir: Path | None = None
@@ -303,7 +316,7 @@ def main() -> int:
     print(f"SENTINEL demo - source={args.source!r} weights={args.weights} imgsz={args.imgsz}")
     print(f"Confidence thresholds: Gun={conf_gun:.2f} Knife={conf_knife:.2f}")
     print(f"Device: {device or 'auto'}")
-    print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits})")
+    print(f"Confirmation: {args.tracker} + track voting (min_hits={args.min_hits} in {args.confirm_window:.1f}s)")
     print("Press q to quit, r to reset the tracker and class voter.")
 
     writer = None

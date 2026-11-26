@@ -9,17 +9,23 @@ track's per-frame labels into ONE stable label: a confidence-weighted
 majority vote over the track's lifetime (each sighting adds its
 confidence to its class's tally; the class with the highest tally wins).
 
-Confirmation: a track is confirmed after ``min_hits`` VISIBLE sightings
-(default 3). Note ByteTrack itself only shows a track after detections
-in 2 consecutive frames (a tentative track unmatched in the very next
-frame is dropped, and new tracks are hidden until matched once) — so
-with ``min_hits=3`` a threat confirms after 4 consecutive detections,
-against 6 for the 6-of-10 buffer. That recovers brief true detections
-("glimpses" of 4-5 frames) the buffer drops, while 1-3 frame blips still
-never confirm. Three visible votes also guarantee a majority, so no
-confirmed label ever rests on a tie-break. ByteTrack's two-stage
-association then keeps a confirmed track alive through weak
-(low-confidence) detections and gaps of up to 30 frames.
+Confirmation is density over time, not a lifetime count: a track is
+confirmed only while it has at least ``min_hits`` sightings within the
+last ``confirm_window_s`` seconds (defaults 3 sightings in 1.0 s), and
+confirmation LAPSES as soon as the density drops below that — a track
+seen twice, then once more a second later, never confirms, because the
+three sightings were never dense. The old rule (``hits >= min_hits`` on
+a lifetime counter) confirmed exactly that sparse pattern: two
+detections plus one more sighting anywhere inside the track's 30-frame
+life confirmed a threat without it ever being detected consistently.
+The voted label itself is still the confidence-weighted lifetime vote;
+only the confirmation rule changed.
+
+Note ByteTrack itself only shows a track after detections in 2
+consecutive frames (a tentative track unmatched in the very next frame
+is dropped, and new tracks are hidden until matched once) — so a
+genuinely present object still confirms within a few frames of becoming
+visible, while 1-2 frame blips never reach the required density.
 
 Pure Python (no torch/ultralytics import), so it is fully unit-testable —
 like the temporal buffer it complements. The TemporalConsistencyBuffer
@@ -29,8 +35,9 @@ demo now confirms via tracking instead of via the buffer.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Deque, Dict, List, Tuple
 
 from .weapon_detector import Detection
 
@@ -41,17 +48,17 @@ class TrackedDetection:
 
     detection: Detection  # voted class; current frame's bbox/confidence
     track_id: int
-    hits: int  # sightings of this track so far
+    hits: int  # sightings of this track within the confirmation window
     vote_share: float  # weighted vote share of the winning class (0.0-1.0)
     raw_class_id: int  # class the model gave this frame, before voting
-    confirmed: bool  # hits >= min_hits
+    confirmed: bool  # >= min_hits sightings within the confirmation window
 
 
 @dataclass
 class _TrackVotes:
     votes: Dict[int, float] = field(default_factory=dict)  # class_id -> conf sum
     counts: Dict[int, int] = field(default_factory=dict)  # class_id -> sightings
-    hits: int = 0
+    hit_times: Deque[float] = field(default_factory=deque)  # monotonic ts per sighting
     last_seen: int = 0  # frame index of the latest sighting
     last_class_id: int = -1
 
@@ -59,12 +66,17 @@ class _TrackVotes:
 class TrackClassVoter:
     """Assigns one stable, voted label per ByteTrack track."""
 
-    def __init__(self, *, min_hits: int = 3, max_age: int = 30) -> None:
+    def __init__(
+        self, *, min_hits: int = 3, confirm_window_s: float = 1.0, max_age: int = 30
+    ) -> None:
         if min_hits < 1:
             raise ValueError("min_hits must be >= 1")
+        if confirm_window_s <= 0:
+            raise ValueError("confirm_window_s must be > 0")
         if max_age < 1:
             raise ValueError("max_age must be >= 1")
         self.min_hits = min_hits
+        self.confirm_window_s = confirm_window_s
         self.max_age = max_age
         self._tracks: Dict[int, _TrackVotes] = {}
         self._names: Dict[int, str] = {}  # class_id -> class_name, as seen
@@ -80,13 +92,19 @@ class TrackClassVoter:
         return len(self._tracks)
 
     def update(
-        self, tracked: List[Tuple[int, Detection]]
+        self, tracked: List[Tuple[int, Detection]], *, now: float
     ) -> List[TrackedDetection]:
         """Feed one frame's (track_id, detection) pairs.
 
+        ``now`` is the frame's monotonic timestamp in seconds (the
+        packet timestamp from the capture thread — NOT the processing
+        time, so a slow inference loop cannot stretch the window).
         Returns one :class:`TrackedDetection` per track visible this
-        frame, each carrying the track's voted label. ``confirmed`` is
-        True once the track has ``min_hits`` sightings.
+        frame, each carrying the track's voted label. ``hits`` counts
+        only sightings within the last ``confirm_window_s`` seconds
+        (a sighting exactly ``confirm_window_s`` old still counts);
+        ``confirmed`` is True only while that count reaches
+        ``min_hits``, so confirmation lapses after silence.
         """
         self._frame += 1
         visible: List[TrackedDetection] = []
@@ -100,7 +118,13 @@ class TrackClassVoter:
                 state.votes.get(det.class_id, 0.0) + det.confidence
             )
             state.counts[det.class_id] = state.counts.get(det.class_id, 0) + 1
-            state.hits += 1
+            state.hit_times.append(now)
+            # Drop sightings older than the window (oldest first: the
+            # deque is in time order because `now` is monotonic).
+            cutoff = now - self.confirm_window_s
+            while state.hit_times and state.hit_times[0] < cutoff:
+                state.hit_times.popleft()
+            hits = len(state.hit_times)
             state.last_seen = self._frame
             state.last_class_id = det.class_id
 
@@ -120,10 +144,10 @@ class TrackClassVoter:
                 TrackedDetection(
                     detection=voted,
                     track_id=track_id,
-                    hits=state.hits,
+                    hits=hits,
                     vote_share=vote_share,
                     raw_class_id=det.class_id,
-                    confirmed=state.hits >= self.min_hits,
+                    confirmed=hits >= self.min_hits,
                 )
             )
 

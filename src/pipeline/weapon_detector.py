@@ -11,8 +11,10 @@ Ultralytics is imported lazily in ``__init__`` so this module can be
 imported (and the :class:`Detection` type used by the temporal buffer and
 its tests) without torch installed.
 
-Per-class confidence thresholds: Gun is the false-positive-prone class
-(val AP50 0.78 vs Knife 0.94), so it gets a higher threshold than Knife.
+Per-class confidence thresholds: the shipped point runs Gun slightly
+higher than Knife (0.44 vs 0.43) — that split was tuned for the v2
+weights on the val split, not from live behaviour. Live, Knife is the
+leaky class (it fires on any elongated object) and Gun is recall-limited.
 The values live in the demo (``scripts/inference/run_weapon_demo.py``),
 tuned on the val split — see
 ``sentinel-dataset-v2/thresholds/operating_point.md``. The detector runs
