@@ -37,11 +37,14 @@ from scripts.evaluation.replay_benchmark import (
     frame_timestamp,
     load_intervals_doc,
     load_sidecar_timestamps,
+    load_timing_sidecar,
     merge_confirmed_frames,
+    resolve_device,
     score_against_intervals,
     score_intervals,
     score_labeled_frames,
     score_negative_clip,
+    weights_fingerprint,
     write_events_csv,
 )
 
@@ -58,6 +61,17 @@ def rec(frame: int, ts: float, cls: str = "Gun", conf: float = 0.9,
 
 
 class TestSidecarAssertion(unittest.TestCase):
+    """Real sidecars are 1-indexed and non-contiguous — mocks must be.
+
+    ``capture.py`` starts its index at 0 and increments before storing
+    the first packet, so the first sidecar line has ``frame_index ==
+    1``; a live webcam drops frames, so later indices skip (1, 2, 4,
+    5, ...). The old mocks fabricated 0-indexed lines, which is why
+    the ``frame_index != i`` assertion shipped uncaught. Every mock
+    here uses real 1-indexed, gap-tolerant entries, and the returned
+    timestamps are ELAPSED seconds (``t == 0`` at the first line).
+    """
+
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.sidecar = Path(self._tmp.name) / "clip.mp4.timestamps.jsonl"
@@ -74,36 +88,82 @@ class TestSidecarAssertion(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_exact_line_count_loads(self) -> None:
-        self._write([(0, 100.0), (1, 100.1), (2, 100.2)])
-        self.assertEqual(
-            load_sidecar_timestamps(self.sidecar, 3), [100.0, 100.1, 100.2]
+    def assertTimestampsAlmostEqual(self, got, want, places=6) -> None:
+        self.assertEqual(len(got), len(want))
+        for actual, expected in zip(got, want):
+            self.assertAlmostEqual(actual, expected, places=places)
+
+    def test_1_indexed_non_contiguous_loads_and_normalizes(self) -> None:
+        # The blocker case: a real webcam sidecar (1-indexed, frame 3
+        # dropped) with raw monotonic uptime must load and come back
+        # as elapsed seconds starting at 0.0.
+        self._write([
+            (1, 482913.42), (2, 482913.45),
+            (4, 482913.52), (5, 482913.55),
+        ])
+        self.assertTimestampsAlmostEqual(
+            load_sidecar_timestamps(self.sidecar, 4),
+            [0.0, 0.03, 0.10, 0.13],
         )
 
     def test_fewer_lines_than_frames_raises(self) -> None:
         # The gate-critical case: a short sidecar must fail loudly,
         # never silently replay at the wrong speed.
-        self._write([(0, 100.0), (1, 100.1)])
+        self._write([(1, 482913.42), (2, 482913.45)])
         with self.assertRaisesRegex(ValueError, "2 lines but the video has 3"):
             load_sidecar_timestamps(self.sidecar, 3)
 
     def test_more_lines_than_frames_raises(self) -> None:
-        self._write([(0, 100.0), (1, 100.1), (2, 100.2), (3, 100.3)])
+        self._write([
+            (1, 482913.42), (2, 482913.45),
+            (3, 482913.48), (4, 482913.51),
+        ])
         with self.assertRaisesRegex(ValueError, "4 lines but the video has 3"):
             load_sidecar_timestamps(self.sidecar, 3)
 
-    def test_frame_index_out_of_order_raises(self) -> None:
-        self._write([(0, 100.0), (5, 100.1), (2, 100.2)])
-        with self.assertRaisesRegex(ValueError, "frame_index 5, expected 1"):
+    def test_frame_index_not_strictly_increasing_raises(self) -> None:
+        self._write([(1, 482913.42), (5, 482913.45), (2, 482913.48)])
+        with self.assertRaisesRegex(ValueError, "not strictly greater"):
             load_sidecar_timestamps(self.sidecar, 3)
+
+    def test_decreasing_ts_raises(self) -> None:
+        self._write([(1, 482913.45), (2, 482913.42)])
+        with self.assertRaisesRegex(ValueError, "goes backwards"):
+            load_sidecar_timestamps(self.sidecar, 2)
+
+    def test_frame_count_none_skips_length_check(self) -> None:
+        # A video that reports no frame count: the loader still
+        # validates order and normalizes; the caller verifies the
+        # count against the frames actually read, after EOF.
+        self._write([(1, 482913.42), (2, 482913.45), (3, 482913.48)])
+        self.assertTimestampsAlmostEqual(
+            load_sidecar_timestamps(self.sidecar, None),
+            [0.0, 0.03, 0.06],
+        )
 
     def test_malformed_line_raises(self) -> None:
         self.sidecar.write_text(
-            '{"frame_index": 0, "ts": 100.0}\nnot json\n',
+            '{"frame_index": 1, "ts": 482913.42}\nnot json\n',
             encoding="utf-8",
         )
         with self.assertRaisesRegex(ValueError, "line 2 is not a"):
             load_sidecar_timestamps(self.sidecar, 2)
+
+    def test_normalized_timestamps_overlap_relative_intervals(self) -> None:
+        # Bug #3 end to end: an uptime sidecar normalized to elapsed
+        # seconds must overlap GT intervals stated in relative time.
+        self._write([
+            (1, 482913.42), (2, 482913.92), (3, 482914.42),
+            (4, 482914.92), (5, 482915.42),
+        ])
+        ts = load_sidecar_timestamps(self.sidecar, 5)
+        self.assertTimestampsAlmostEqual(ts, [0.0, 0.5, 1.0, 1.5, 2.0])
+        events = merge_confirmed_frames(
+            [rec(4, ts[4], "Knife")], cooldown_s=5.0
+        )
+        scored = score_intervals(events, [[2.0, 30.0]], "Knife")
+        self.assertEqual(scored["recalled_intervals"], 1)
+        self.assertEqual(scored["recall"], 1.0)
 
 
 class TestAlarmEventMerging(unittest.TestCase):
@@ -198,8 +258,8 @@ class TestAlarmEventMerging(unittest.TestCase):
 
 class TestTimingSource(unittest.TestCase):
     def test_sidecar_present_uses_sidecar_ts(self) -> None:
-        sidecar = [100.0, 100.033, 100.066]
-        self.assertEqual(frame_timestamp(2, sidecar, 30.0), 100.066)
+        sidecar = [0.0, 0.033, 0.066]
+        self.assertEqual(frame_timestamp(2, sidecar, 30.0), 0.066)
 
     def test_sidecar_absent_uses_frame_index_over_fps(self) -> None:
         self.assertAlmostEqual(frame_timestamp(90, None, 30.0), 3.0)
@@ -208,6 +268,148 @@ class TestTimingSource(unittest.TestCase):
     def test_no_sidecar_and_no_fps_raises(self) -> None:
         with self.assertRaisesRegex(ValueError, "no FPS"):
             frame_timestamp(0, None, 0.0)
+
+    def test_frame_past_sidecar_end_raises_clean_error(self) -> None:
+        # VFR case: the video decoded more frames than the sidecar
+        # covers. Must be a clean ValueError (the loop exits 2), never
+        # an uncaught IndexError.
+        with self.assertRaisesRegex(ValueError, "past the end"):
+            frame_timestamp(3, [0.0, 0.1, 0.2], 30.0)
+        self.assertEqual(frame_timestamp(2, [0.0, 0.1, 0.2], 30.0), 0.2)
+
+
+class TestTimingSidecarLoading(unittest.TestCase):
+    """load_timing_sidecar: always load when a sidecar exists."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.video = Path(self._tmp.name) / "clip.mp4"
+        self.video.write_bytes(b"fake video")
+        self.sidecar = Path(self._tmp.name) / "clip.mp4.timestamps.jsonl"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, entries) -> None:
+        self.sidecar.write_text(
+            "".join(
+                json.dumps({"frame_index": i, "ts": ts}) + "\n"
+                for i, ts in entries
+            ),
+            encoding="utf-8",
+        )
+
+    def test_no_sidecar_returns_fps(self) -> None:
+        ts, source = load_timing_sidecar(self.video, 3)
+        self.assertIsNone(ts)
+        self.assertEqual(source, "fps")
+
+    def test_sidecar_loaded_when_reported_frames_positive(self) -> None:
+        self._write([(1, 482913.42), (2, 482913.45), (3, 482913.48)])
+        ts, source = load_timing_sidecar(self.video, 3)
+        self.assertEqual(source, "sidecar")
+        self.assertEqual(len(ts), 3)
+        self.assertAlmostEqual(ts[0], 0.0)
+
+    def test_sidecar_loaded_when_reported_frames_zero(self) -> None:
+        # Bug #4: a video reporting no frame count used to silently
+        # skip the sidecar while still labeling timing "sidecar".
+        self._write([(1, 482913.42), (2, 482913.45), (3, 482913.48)])
+        ts, source = load_timing_sidecar(self.video, 0)
+        self.assertEqual(source, "sidecar")
+        self.assertEqual(len(ts), 3)
+
+    def test_sidecar_loaded_when_reported_frames_negative(self) -> None:
+        self._write([(1, 482913.42), (2, 482913.45)])
+        ts, source = load_timing_sidecar(self.video, -1)
+        self.assertEqual(source, "sidecar")
+        self.assertEqual(len(ts), 2)
+
+    def test_mismatched_count_raises_when_reported_positive(self) -> None:
+        self._write([(1, 482913.42), (2, 482913.45), (3, 482913.48)])
+        with self.assertRaisesRegex(ValueError, "3 lines but the video has 2"):
+            load_timing_sidecar(self.video, 2)
+
+
+class TestWeightsFingerprint(unittest.TestCase):
+    def test_pt_file_hashed(self) -> None:
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            weights = Path(tmp) / "best.pt"
+            weights.write_bytes(b"fake weights")
+            finger = weights_fingerprint(weights)
+        self.assertEqual(
+            finger["weights_sha256"],
+            hashlib.sha256(b"fake weights").hexdigest(),
+        )
+        self.assertIsNone(finger["weights_xml_sha256"])
+        self.assertIsNone(finger["weights_note"])
+
+    def test_openvino_dir_hashed(self) -> None:
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "weapon_openvino_model"
+            model.mkdir()
+            (model / "weapon.bin").write_bytes(b"fake bin")
+            (model / "weapon.xml").write_bytes(b"fake xml")
+            finger = weights_fingerprint(model)
+        self.assertEqual(
+            finger["weights_sha256"],
+            hashlib.sha256(b"fake bin").hexdigest(),
+        )
+        self.assertEqual(
+            finger["weights_xml_sha256"],
+            hashlib.sha256(b"fake xml").hexdigest(),
+        )
+        self.assertIn("openvino", finger["weights_note"])
+
+    def test_openvino_dir_bin_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "weapon_openvino_model"
+            model.mkdir()
+            (model / "weapon.bin").write_bytes(b"fake bin")
+            finger = weights_fingerprint(model)
+        self.assertIsNotNone(finger["weights_sha256"])
+        self.assertIsNone(finger["weights_xml_sha256"])
+        self.assertIn("no .xml", finger["weights_note"])
+
+    def test_missing_path_records_note(self) -> None:
+        finger = weights_fingerprint(Path("/nonexistent/best.pt"))
+        self.assertIsNone(finger["weights_sha256"])
+        self.assertIsNone(finger["weights_xml_sha256"])
+        self.assertIsNotNone(finger["weights_note"])
+
+
+class TestResolveDevice(unittest.TestCase):
+    def test_explicit_device_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            weights = Path(tmp) / "best.pt"
+            weights.write_bytes(b"fake weights")
+            self.assertEqual(resolve_device("cpu", weights), "cpu")
+
+    def test_auto_on_pt_is_none(self) -> None:
+        # A .pt file has no OpenVINO device to select: ultralytics
+        # chooses.
+        with tempfile.TemporaryDirectory() as tmp:
+            weights = Path(tmp) / "best.pt"
+            weights.write_bytes(b"fake weights")
+            self.assertIsNone(resolve_device("auto", weights))
+
+    def test_auto_consults_openvino_detector_for_model_dir(self) -> None:
+        from unittest.mock import patch
+
+        import scripts.evaluation.replay_benchmark as harness
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "weapon_openvino_model"
+            model.mkdir()
+            with patch.object(
+                harness, "detect_openvino_device", return_value="xpu"
+            ) as detector:
+                self.assertEqual(resolve_device("auto", model), "xpu")
+                detector.assert_called_once_with(model)
 
 
 class TestArgDefaults(unittest.TestCase):
@@ -337,6 +539,20 @@ class TestLabeledFrameScoring(unittest.TestCase):
         labeled = [{"t": 10.0, "decision": "positive"}]
         scored = score_labeled_frames(confirmed, labeled, "Gun")
         self.assertEqual(scored["recall"], 0.0)
+
+    def test_wrong_class_fp_on_negative_frame_counts(self) -> None:
+        # Nit fix: on the UCF clips ("class": "Gun") a confirmed Knife
+        # FP overlapping a labeled negative frame must count — the old
+        # code only checked the clip's own class and silently ignored
+        # it.
+        confirmed = [rec(300, 10.0, "Knife")]
+        labeled = [
+            {"t": 10.0, "decision": "negative"},  # Knife FP overlaps
+            {"t": 60.0, "decision": "negative"},
+        ]
+        scored = score_labeled_frames(confirmed, labeled, "Gun")
+        self.assertIsNone(scored["recall"])
+        self.assertEqual(scored["negative_frames_overlapped"], 1)
 
 
 class TestScoringDispatch(unittest.TestCase):
