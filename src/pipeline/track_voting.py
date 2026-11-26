@@ -12,12 +12,18 @@ confidence to its class's tally; the class with the highest tally wins).
 Confirmation is density over time, not a lifetime count: a track is
 confirmed only while it has at least ``min_hits`` sightings within the
 last ``confirm_window_s`` seconds (defaults 3 sightings in 1.0 s), and
-confirmation LAPSES as soon as the density drops below that — a track
-seen twice, then once more a second later, never confirms, because the
-three sightings were never dense. The old rule (``hits >= min_hits`` on
-a lifetime counter) confirmed exactly that sparse pattern: two
-detections plus one more sighting anywhere inside the track's 30-frame
-life confirmed a threat without it ever being detected consistently.
+confirmation LAPSES as soon as the density drops below that — e.g.
+sightings at 0.0 s and 0.1 s, then once more at 1.5 s, never confirm
+together, because the first two have aged out of the 1.0 s window by
+then. But the span is first-to-last, not continuity: three sightings
+at 0.0, 0.5 and 0.9 s DO confirm (3 hits in-window, span 0.9 s) — gaps
+inside the window are tolerated by design, so near-threshold flicker
+does not drop a real detection, and a phone flickering the same way
+confirms too; no confirmation rule can separate the two by pattern
+alone. The old rule (``hits >= min_hits`` on a lifetime counter)
+confirmed exactly that sparse pattern: two detections plus one more
+sighting anywhere inside the track's 30-frame life confirmed a threat
+without it ever being detected consistently.
 
 Density alone is still a frame count in a time window: at 39 FPS three
 sightings span ~0.1 s, so a phone sweeping through frame for four

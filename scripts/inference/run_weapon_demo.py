@@ -22,8 +22,13 @@ confirms only while it has ``--min-hits`` sightings within the last
 in-window sighting is at least ``--confirm-min-span`` old (default
 0.4 s) — a burst of sightings inside the span never confirms, however
 dense it is, so the rule no longer weakens as the model gets faster.
-Confirmation lapses when the density drops — sparse sightings spread
-over a second never confirm. The old 6-of-10 temporal buffer
+Confirmation lapses when the density drops — sightings more than a
+second apart never combine (only in-window sightings count). But the
+span measures first-to-last, not continuity: three sightings at 0.0,
+0.5 and 0.9 s do confirm, gaps tolerated by design — so a flickering
+phone confirms the same way a flickering knife does; only the data,
+and tuning on rehearsal session A, can separate them. The old 6-of-10
+temporal buffer
 (``src/pipeline/temporal_buffer.py``) is kept intact for RQ3
 reproducibility — the demo simply no longer uses it.
 
@@ -147,8 +152,9 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Sightings of a track needed to confirm it (default 3 — "
-        "counted only within the --confirm-window, so sparse "
-        "sightings spread over time never confirm).",
+        "counted only within the --confirm-window; sightings more "
+        "than a window apart never combine, but gaps inside the "
+        "window are tolerated).",
     )
     parser.add_argument(
         "--confirm-window",
