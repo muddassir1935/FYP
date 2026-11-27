@@ -10,16 +10,18 @@ can be traced back to the exact weights that produced it.
 > near-duplicate in train, including 18 byte-identical files (Stage-1 audit,
 > 21 Nov 2026 — `audit-v4/audit_stage1_report.md`). Every frozen-test mAP50
 > in this log (v1 0.8066, v2 0.8621, v2.1 0.8108, v2.2 0.7955, v3 0.8666,
-> v4ft 0.751, v4 0.8293) is therefore **leakage-inflated** — the honest
-> series is the cleaned-511 test column below (v2 0.8264, v3 0.8378,
-> v4ft 0.709, v4 0.8081). Quote the cleaned numbers in the report; the
-> frozen numbers are comparable across runs only as a (biased) relative
-> series.
+> v4ft 0.751, v4 0.8293) is therefore **leakage-inflated** — the
+> cleaned-511 test column below (v2 0.8264, v3 0.8378, v4ft 0.709,
+> v4 0.8081) is a Stage-1-cleaned number, still an upper bound, not
+> "the honest series": the frozen 1,195 test (union freeze vs v3+v5
+> train, 27 Nov 2026) supersedes it for v5. Quote the frozen-1,195
+> numbers in the report; the frozen numbers are comparable across runs
+> only as a (biased) relative series.
 
 - Drive root: `SENTINEL_FYP/runs/<run_name>/` (weights, `results.csv`,
   `run_summary.json`, confusion matrix)
 - Training script: `scripts/training/train_weapon_detector.py`
-- Notebook: `notebooks/sentinel_weapon_training.ipynb`
+- Notebook: `notebooks/sentinel_kaggle_training.ipynb`
 - Dataset: weapon YOLO, classes Gun (0), Knife (1). v1 trained on 6,762
   images (train 4,731 / val 1,351 / test 680); v2–v4 trained on Kaggle
   (not Colab) on 13,242–24,146 train images — see the per-entry dataset
@@ -45,12 +47,12 @@ can be traced back to the exact weights that produced it.
   ~10:1 knife rotated 20° grows to ~4.2× its area, mostly background).
   Kept because rotation fixed the vertical-knife→gun failure, and v3's
   Knife AP50 (0.9493 frozen test) shows the trade-off did not prevent
-  strong knife detection. `erasing=0.4` — random erasing blanks a
-  rectangle on ~40% of images and can delete a small knife from the
-  image while its label stays (pure label noise for small objects).
-  Risk compounds with mosaic, which shrinks objects 4× for the first
-  90 epochs. Kept with the risk noted; v3's frozen-test numbers were
-  still strong.
+  strong knife detection. `erasing=0.4` — INERT for detection (verified
+  26 Nov from the installed ultralytics 8.4.215 source): `RandomErasing`
+  lives only in the classification pipeline, so the detection trainer
+  never blanks a rectangle and no label noise is created. The risk this
+  note used to describe never existed for this task; the knob stays in
+  the frozen recipe as a no-op.
 - **Mosaic trade-off:** `mosaic=1.0` composites 4 images into 1, so every
   object is rendered at half resolution (4× smaller area) for the first
   90 epochs; `close_mosaic=10` disables it only for the final 10

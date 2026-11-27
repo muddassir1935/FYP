@@ -150,7 +150,7 @@ This provides robustness against CCTV sensor noise, perspective compression, and
   Stage-1 audit found the frozen test leaks 25% into train (169/680,
   incl. 18 byte-identical pairs) and val 22% (303/1,351) — every
   frozen-test number in the run log is leakage-inflated; the cleaned
-  511-image test is the honest series.
+  511-image test is a Stage-1-cleaned number, still an upper bound.
 * **Detail:** `V3_ASSEMBLY_REPORT.md`, `eval_v3_summary.md`,
   `audit-v4/audit_stage1_report.md`, `audit-v4/clean_test_eval.json`,
   `docs/training_run_log.md` #6.

@@ -77,9 +77,17 @@ def main() -> int:
     )
     log_path = Path(log_file.name)
     print(f"Server log: {log_path}")
+    # Smoke artifacts (snapshots, recorded videos, JSONL logs) go in
+    # a temp dir, NOT the repo's real snapshots/, videos/recordings/
+    # and logs/ — otherwise a morning-of-review smoke run leaves its
+    # recordings sitting in the jury demo UI.
+    smoke_tmp = tempfile.TemporaryDirectory(prefix="smoke_demo_ui_")
     server = subprocess.Popen(
         [sys.executable, "-u", str(REPO_ROOT / "scripts" / "run_demo_ui.py"),
-         "--port", str(args.port), "--no-browser"],
+         "--port", str(args.port), "--no-browser",
+         "--snapshots-dir", str(Path(smoke_tmp.name) / "snapshots"),
+         "--save-video-dir", str(Path(smoke_tmp.name) / "recordings"),
+         "--log-dir", str(Path(smoke_tmp.name) / "logs")],
         stdout=log_file,
         stderr=subprocess.STDOUT,
     )
@@ -258,6 +266,7 @@ def main() -> int:
         except subprocess.TimeoutExpired:
             server.kill()
         log_file.close()
+        smoke_tmp.cleanup()
         # The tail prints here (not at the bottom) so even the
         # early-return failure paths get diagnostics.
         if any(not ok for _, ok, _ in CHECKS):

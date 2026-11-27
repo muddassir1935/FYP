@@ -184,6 +184,12 @@ def parse_args() -> argparse.Namespace:
         default=str(REPO_ROOT / "snapshots"),
         help="Where confirmed-threat snapshots are saved.",
     )
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Folder for the per-detection JSONL log "
+        "(default: repo-root logs/).",
+    )
     parser.add_argument("--no-snapshots", action="store_true", help="Disable snapshot saving.")
     parser.add_argument(
         "--save-video",
@@ -332,8 +338,32 @@ def main() -> int:
         # stream past unanalysed while the graph compiles.
         detector.warmup(tracker=args.tracker)
     except Exception as exc:
-        print(f"ERROR: model warmup failed: {exc}", file=sys.stderr)
-        return 1
+        if device != "intel:gpu":
+            print(f"ERROR: model warmup failed: {exc}", file=sys.stderr)
+            return 1
+        # Intel GPU compile failed — fall back to CPU loudly, like
+        # DemoRunner does: a silent fallback would run the demo at
+        # CPU speed with no indication anywhere.
+        print(
+            f"WARNING: Intel GPU compile failed ({exc}); running on CPU",
+            file=sys.stderr,
+        )
+        device = None
+        try:
+            detector = WeaponDetector(
+                args.weights,
+                conf_threshold=fallback_conf,
+                conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
+                imgsz=args.imgsz,
+                device=None,
+            )
+            detector.warmup(tracker=args.tracker)
+        except Exception as exc2:
+            print(
+                f"ERROR: model warmup failed on CPU too: {exc2}",
+                file=sys.stderr,
+            )
+            return 1
     voter = TrackClassVoter(
         min_hits=args.min_hits,
         confirm_window_s=args.confirm_window,
@@ -367,6 +397,11 @@ def main() -> int:
         # not a raw traceback.
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    # --log-dir only overrides the worker's default (repo-root logs/);
+    # passing None would DISABLE logging, so omit it when unset.
+    worker_kwargs: dict = {}
+    if args.log_dir:
+        worker_kwargs["log_dir"] = Path(args.log_dir)
     worker = InferenceWorker(
         stream,
         detector,
@@ -376,6 +411,7 @@ def main() -> int:
         snapshots_dir=snapshots_dir,
         source=args.source,
         recording=args.save_video,
+        **worker_kwargs,
     )
     worker.start()
     try:

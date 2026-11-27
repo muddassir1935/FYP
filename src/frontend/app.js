@@ -94,7 +94,13 @@ async function api(path, options) {
     let detail = `Request failed (${res.status}).`;
     try {
       const body = await res.json();
-      if (body && body.detail) detail = body.detail;
+      if (body && body.detail !== undefined && body.detail !== null) {
+        // FastAPI 422 returns detail as an ARRAY of error objects, not
+        // a string — joining it raw renders "[object Object]".
+        detail = Array.isArray(body.detail)
+          ? body.detail.map((d) => d.msg || JSON.stringify(d)).join("; ")
+          : body.detail;
+      }
     } catch (_) { /* keep the generic message */ }
     throw new Error(detail);
   }

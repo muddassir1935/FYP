@@ -645,6 +645,13 @@ class DemoRunner:
                 removed += 1
             except OSError:
                 pass
+        # Reset the run-start baseline too: status() reports
+        # len(snapshots) - _snapshots_at_start, so without this a
+        # mid-run clear would silence gallery updates + the siren
+        # for the next N threats (one per snapshot that existed
+        # when the run started).
+        with self._lock:
+            self._snapshots_at_start = 0
         return removed
 
     # -- internals -------------------------------------------------------

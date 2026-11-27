@@ -6,11 +6,15 @@ were checked against the installed packages (November 2026).
 
 | Library | Version | License | Used for |
 | --- | --- | --- | --- |
-| Ultralytics YOLOv8 (`ultralytics`) | 8.4.215 | AGPL-3.0 | Weapon detection (YOLOv8s) and pose estimation (YOLOv8m-Pose) |
+| Ultralytics YOLOv8 (`ultralytics`) | 8.4.208 | AGPL-3.0 | Weapon detection (YOLOv8s) and pose estimation (YOLOv8m-Pose) |
 | PyTorch (`torch`, `torchvision`) | 2.15.0 | Apache-2.0 | Deep-learning framework, LSTM behaviour classifier training |
 | OpenCV (`opencv-python`) | 5.0.0 | Apache-2.0 | Video capture, frame handling, image processing |
 | OpenVINO (`openvino`) | 2026.4.1 | Apache-2.0 | Model inference acceleration on Intel hardware |
 | NumPy (`numpy`) | 2.4.6 | BSD-3-Clause | Numerical arrays, frame and keypoint maths |
+| FastAPI (`fastapi`) | 0.115.6 | MIT | Demo web UI backend (REST endpoints) |
+| Uvicorn (`uvicorn`) | 0.54.0 | BSD-3-Clause | ASGI server for the demo web UI |
+| python-multipart (`python-multipart`) | 0.0.34 | Apache-2.0 | Multipart form parsing for video uploads |
+| HTTPX (`httpx`) | 0.28.1 | BSD-3-Clause | HTTP client for the UI smoke test |
 
 ## Note on YOLOv8 (AGPL-3.0)
 

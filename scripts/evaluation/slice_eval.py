@@ -240,6 +240,11 @@ def main() -> int:
     parser.add_argument("--conf-knife", type=float, default=None,
                         help="Knife confidence (overrides --conf for Knife).")
     parser.add_argument("--iou", type=float, default=0.5, help="Matching IoU.")
+    parser.add_argument("--nms-iou", type=float, default=0.45,
+                        help="NMS IoU for inference (default 0.45, matching "
+                        "WeaponDetector.iou_threshold — Ultralytics' 0.7 "
+                        "predict default would keep boxes the demo "
+                        "suppresses).")
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--limit", type=int, default=0, help="Max images (0 = all).")
@@ -308,6 +313,7 @@ def main() -> int:
         results = model.predict(
             source=str(image_path),
             conf=capture_conf,
+            iou=args.nms_iou,
             imgsz=args.imgsz,
             device=args.device,
             verbose=False,
@@ -409,6 +415,7 @@ def main() -> int:
             "conf_knife": conf_knife,
             "capture_conf": capture_conf,
             "iou": args.iou,
+            "nms_iou": args.nms_iou,
             "imgsz": args.imgsz,
             "n_images": n_images,
             "n_images_no_gt": n_no_gt,

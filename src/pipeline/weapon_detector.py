@@ -15,8 +15,8 @@ Per-class confidence thresholds: the shipped point runs Gun slightly
 higher than Knife (0.44 vs 0.43) — that split was tuned for the v2
 weights on the val split, not from live behaviour. Live, Knife is the
 leaky class (it fires on any elongated object) and Gun is recall-limited.
-The values live in the demo (``scripts/inference/run_weapon_demo.py``),
-tuned on the val split — see
+The values live in ``src/pipeline/thresholds.py`` (the single source of
+truth for the demo operating point), tuned on the val split — see
 ``sentinel-dataset-v2/thresholds/operating_point.md``. The detector runs
 the model once at the lowest threshold that still covers every class
 and post-filters per class, which is exactly equivalent to filtering each class before NMS (NMS always keeps the

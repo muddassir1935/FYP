@@ -59,6 +59,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save-video-dir", default=None,
                         help="Folder for recorded videos "
                         "(default: videos/recordings/).")
+    parser.add_argument("--log-dir", default=None,
+                        help="Folder for the per-detection JSONL log "
+                        "(default: repo-root logs/).")
     return parser.parse_args()
 
 
@@ -104,6 +107,7 @@ def main() -> int:
         weights_dir=Path(args.weights_dir) if args.weights_dir else None,
         snapshots_dir=Path(args.snapshots_dir) if args.snapshots_dir else None,
         save_video_dir=Path(args.save_video_dir) if args.save_video_dir else None,
+        log_dir=Path(args.log_dir) if args.log_dir else None,
     )
     # Own the Server object (instead of uvicorn.run) so the console's
     # Stop server button can shut the process down via should_exit.

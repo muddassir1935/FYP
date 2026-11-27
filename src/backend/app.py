@@ -61,6 +61,7 @@ def create_app(
     weights_dir: Path | None = None,
     snapshots_dir: Path | None = None,
     save_video_dir: Path | None = None,
+    log_dir: Path | None = None,
 ) -> FastAPI:
     videos_dir = Path(videos_dir) if videos_dir else REPO_ROOT / "videos"
     weights_dir = Path(weights_dir) if weights_dir else REPO_ROOT / "models" / "weights"
@@ -79,6 +80,7 @@ def create_app(
         weights_dir=weights_dir,
         snapshots_dir=snapshots_dir,
         save_video_dir=save_video_dir,
+        log_dir=log_dir,
     )
 
     app = FastAPI(title="SENTINEL Demo Console", version="0.1.0")
