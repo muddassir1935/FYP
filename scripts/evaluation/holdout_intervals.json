@@ -362,6 +362,33 @@
           "decision": "negative"
         }
       ]
+    },
+    {
+      "clip": "qaim-pistol",
+      "video": "videos/v5-qaim/Qaim-v5-pistol.mp4",
+      "fps": 59.996,
+      "duration_s": 111.0,
+      "class": "Gun",
+      "gt_positive_frames": 220,
+      "intervals": [
+        [
+          0.0,
+          18.5
+        ],
+        [
+          19.5,
+          94.5
+        ],
+        [
+          95.5,
+          107.0
+        ],
+        [
+          108.0,
+          111.0
+        ]
+      ],
+      "notes": "APPROVED 27 Nov 2026 ~15:28 PKT (owner review, 0 drops; real gun confirmed by the user via Qaim) \u2014 gate claim is real-Gun recall. Intervals = maximal contiguous kept-positive runs at 2 FPS sampling (t = sample_idx*0.5s), split at the 3 unverifiable samples (19.0s, 95.0s, 107.5s) where the pistol is present but the box extent could not be verified. The pistol is held continuously; the splits are 0.5s verification gaps, not absence."
     }
   ]
 }
