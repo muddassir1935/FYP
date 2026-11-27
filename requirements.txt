@@ -12,7 +12,14 @@
 --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Inference
-ultralytics==8.4.215
+# ultralytics 8.4.208, NOT 8.4.215: on 8.4.215 select_device("intel:gpu")
+# raises (AutoBackend calls select_device unconditionally), so the
+# OpenVINO Intel-GPU path is unusable on the demo laptop (verified
+# 26 Nov 2026) — the laptop stays on 8.4.208 until the GPU path is
+# verified there. (The Kaggle training notebook installs 8.4.215
+# explicitly in Step 3; that is correct for Kaggle — do not "fix" it
+# to match this file.)
+ultralytics==8.4.208
 opencv-python==5.0.0.93
 numpy==2.4.6
 torch==2.15.0+cpu

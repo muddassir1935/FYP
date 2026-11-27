@@ -46,6 +46,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.pipeline import (  # noqa: E402
+    CONF_GUN,
+    CONF_KNIFE,
+    DEFAULT_CONF,
     ConfirmedDetection,
     Detection,
     TemporalConsistencyBuffer,
@@ -54,6 +57,7 @@ from src.pipeline import (  # noqa: E402
     WeaponDetector,
     bbox_iou,
 )
+from src.pipeline.timestamp_sidecar import sidecar_path_for  # noqa: E402
 
 CHAIN_IOU = 0.3  # same physical object across frames (matches the buffer's IoU)
 CHAIN_MAX_GAP = 1  # frames a chain may skip and still continue (fast motion
@@ -143,6 +147,50 @@ def count_switches(labels: List[int]) -> int:
     return max(0, len(deduped) - 1)
 
 
+def load_sidecar_elapsed(source: str) -> List[float] | None:
+    """Elapsed-second timestamps from ``<source>.timestamps.jsonl``.
+
+    Mirrors replay_benchmark.load_sidecar_timestamps: one ts per line,
+    normalized so t == 0 at the first line; frame_index values must be
+    strictly increasing and ts non-decreasing. Unlike the gate harness,
+    an unusable sidecar only warns and returns None (fall back to
+    container FPS) — this script is an analysis tool, not a gate, and
+    a stale sidecar must not refuse the whole comparison.
+    """
+    path = sidecar_path_for(source)
+    if not path.is_file():
+        return None
+    try:
+        lines = [
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        raw: List[float] = []
+        prev_index: Optional[int] = None
+        prev_ts: Optional[float] = None
+        for i, line in enumerate(lines):
+            entry = json.loads(line)
+            frame_index = int(entry["frame_index"])
+            ts = float(entry["ts"])
+            if prev_index is not None and frame_index <= prev_index:
+                raise ValueError(f"line {i + 1}: frame_index not increasing")
+            if prev_ts is not None and ts < prev_ts:
+                raise ValueError(f"line {i + 1}: ts goes backwards")
+            prev_index, prev_ts = frame_index, ts
+            raw.append(ts)
+        if not raw:
+            return None
+        first = raw[0]
+        return [t - first for t in raw]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(
+            f"WARNING: ignoring unusable timestamp sidecar {path} ({exc}); "
+            "using container FPS for voter time."
+        )
+        return None
+
+
 def iter_frames(
     cv2_module: object, source: str, start_frame: int, max_frames: int
 ):
@@ -172,9 +220,12 @@ def main() -> int:
     parser.add_argument("--source", required=True, help="Video clip path.")
     parser.add_argument("--start-frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0, help="0 = whole clip.")
-    parser.add_argument("--conf", type=float, default=0.40,
+    parser.add_argument("--conf", type=float, default=None,
                         help="Flat confidence (both classes) when "
-                        "--conf-gun/--conf-knife are absent.")
+                        "--conf-gun/--conf-knife are absent. When omitted, "
+                        "the shipped per-class operating point from "
+                        "src/pipeline/thresholds.py applies "
+                        f"(Gun {CONF_GUN}, Knife {CONF_KNIFE}).")
     parser.add_argument("--conf-gun", type=float, default=None,
                         help="Gun confidence (overrides --conf for Gun).")
     parser.add_argument("--conf-knife", type=float, default=None,
@@ -199,6 +250,13 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.confirm_min_span > args.confirm_window:
+        parser.error(
+            "--confirm-min-span must be <= --confirm-window "
+            f"(got {args.confirm_min_span} > {args.confirm_window}); "
+            "a larger span makes confirmation impossible"
+        )
+
     try:
         import cv2
     except ImportError:
@@ -206,13 +264,23 @@ def main() -> int:
         return 1
 
     # Effective per-class thresholds: an explicit --conf-<class> wins,
-    # otherwise the flat --conf applies to that class (same convention
-    # as slice_eval.py and run_weapon_demo.py).
-    conf_gun = args.conf_gun if args.conf_gun is not None else args.conf
-    conf_knife = args.conf_knife if args.conf_knife is not None else args.conf
+    # otherwise an explicit flat --conf, otherwise the shipped
+    # per-class operating point from src/pipeline/thresholds.py (the
+    # old flat 0.40 default silently desynced this script from the
+    # demo whenever thresholds.py moved).
+    conf_gun = (
+        args.conf_gun
+        if args.conf_gun is not None
+        else args.conf if args.conf is not None else CONF_GUN
+    )
+    conf_knife = (
+        args.conf_knife
+        if args.conf_knife is not None
+        else args.conf if args.conf is not None else CONF_KNIFE
+    )
     detector = WeaponDetector(
         args.weights,
-        conf_threshold=args.conf,
+        conf_threshold=args.conf if args.conf is not None else DEFAULT_CONF,
         conf_thresholds={"Gun": conf_gun, "Knife": conf_knife},
         imgsz=args.imgsz,
         device=args.device,
@@ -240,12 +308,21 @@ def main() -> int:
     # ---- Pass B: track() + voter ------------------------------------------
     # The voter needs timestamps, and this script runs offline (faster
     # than real time), so wall-clock time would compress the video:
-    # use VIDEO time (frame_index / fps) instead, which is what the
-    # live demo sees. Falls back to 30 fps if the clip reports none.
+    # use VIDEO time instead, which is what the live demo sees. A
+    # <video>.timestamps.jsonl sidecar (written by the demo recorder)
+    # gives the true per-frame times — container FPS lies on webcam
+    # recordings (25 fps header, ~30 fps actual), which would replay
+    # the clip 1.2x slow and stretch every voter span. Falls back to
+    # 30 fps if the clip reports none and no sidecar exists.
     _cap = cv2.VideoCapture(args.source)
     _fps = _cap.get(cv2.CAP_PROP_FPS) if _cap.isOpened() else 0.0
     _cap.release()
     clip_fps = _fps if _fps and _fps > 0 else 30.0
+    sidecar_ts = load_sidecar_elapsed(args.source)
+    if sidecar_ts is not None:
+        print(f"Voter time: timestamp sidecar ({len(sidecar_ts)} frames)")
+    else:
+        print(f"Voter time: container FPS ({clip_fps})")
     detector.reset_tracker()
     voter = TrackClassVoter(
         min_hits=args.min_hits,
@@ -264,7 +341,17 @@ def main() -> int:
         tracked_by_frame.append(tracked)
         for track_id, det in tracked:
             raw_by_track.setdefault(track_id, []).append(det.class_id)
-        voted = voter.update(tracked, now=frame_index / clip_fps)
+        # Sidecar line i is replay frame i positionally (1-indexed
+        # frame_index, t == 0 at the first line); with --start-frame
+        # the replay starts at absolute frame start_frame. Fall back
+        # to frame_index / fps when the sidecar is shorter than the
+        # replayed range.
+        sidecar_i = args.start_frame + frame_index
+        if sidecar_ts is not None and sidecar_i < len(sidecar_ts):
+            now = sidecar_ts[sidecar_i] - sidecar_ts[args.start_frame]
+        else:
+            now = frame_index / clip_fps
+        voted = voter.update(tracked, now=now)
         voted_by_frame.append(voted)
         for t in voted:
             if t.confirmed:
@@ -365,9 +452,9 @@ def main() -> int:
           f"tracker {trk_conf_frames}")
     print(f"  mean frames to confirm:    buffer {mean(buf_lat)}, "
           f"tracker {mean(trk_lat)}")
-    print(f"\nSpeed: buffer pass {buffer_seconds / n_frames:.2f}s/frame, "
-          f"track pass {track_seconds / n_frames:.2f}s/frame "
-          f"(CPU, {args.imgsz}px)")
+    print(f"\nSpeed: buffer pass {buffer_seconds / n_frames if n_frames else 0.0:.2f}s/frame, "
+          f"track pass {track_seconds / n_frames if n_frames else 0.0:.2f}s/frame "
+          f"({args.device}, {args.imgsz}px)")
 
     if args.dump:
         def det_dict(d: Detection) -> dict:
@@ -446,8 +533,8 @@ def main() -> int:
             "confirmed_frames_tracker": trk_conf_frames,
             "mean_frames_to_confirm_buffer": mean(buf_lat),
             "mean_frames_to_confirm_tracker": mean(trk_lat),
-            "seconds_per_frame_buffer": buffer_seconds / n_frames,
-            "seconds_per_frame_track": track_seconds / n_frames,
+            "seconds_per_frame_buffer": buffer_seconds / n_frames if n_frames else 0.0,
+            "seconds_per_frame_track": track_seconds / n_frames if n_frames else 0.0,
         }
         Path(args.out).write_text(json.dumps(result, indent=2))
         print(f"\nNumbers written to {args.out}")

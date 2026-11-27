@@ -43,6 +43,16 @@ venv.bak/
 *.flv
 *.webm
 
+# Recording sidecars: per-frame timestamps written next to each raw
+# recording (<recording>.timestamps.jsonl) — multi-MB, regenerable,
+# and NOT covered by *.mp4, so a `git add .` after any demo recording
+# would commit them.
+*.timestamps.jsonl
+# Demo output dirs (recorded videos, uploaded clips) — runtime
+# artifacts, never committed.
+videos/recordings/
+videos/uploads/
+
 *.zip
 *.tar
 *.tar.gz

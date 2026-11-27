@@ -68,11 +68,11 @@
   near-duplicate in train, including **18 byte-identical** train/test
   pairs; **303/1,351 val images (22%)** leak into train the same way.
   All frozen-test mAP50 numbers (v1–v4) are therefore leakage-inflated;
-  the honest series is the cleaned-511 test (see
-  `docs/training_run_log.md`). Full findings:
+  the cleaned-511 test is a Stage-1-cleaned number, still an upper
+  bound (see `docs/training_run_log.md`). Full findings:
   `audit-v4/audit_stage1_report.md` (dataset workspace).
 * [x] **Coordinate Normalization**: All bounding boxes clamped to `[0.0, 1.0]`; degenerate boxes discarded.
-* [x] **Corrupted File Quarantine**: Quarantined items tracked in [`DataSets/raw/quarantine_log.txt`](../DataSets/raw/quarantine_log.txt).
+* [x] **Corrupted File Quarantine**: Quarantined items tracked in the local `DataSets/raw/quarantine_log.txt` (gitignored — not in the repo, so no link).
 * [x] **Git Cleanliness**: Raw datasets, videos, images, and `.npy` binaries are ignored in [`.gitignore`](../.gitignore).
 
 ---
@@ -104,7 +104,8 @@ Notes:
   dataset; it has no separate version line above because it reuses the
   v4 pool. Zip `weapon_yolo_v4ft.zip`
   (`81a7fe131f73fe0444e1708dddf269b7`).
-* The grown test set (cleaned 511 + 956 new images = 1,467) and the
-  cleaned val (1,048) are evaluation sets built during the v5 audit
+* The grown test set (1,567 images) was frozen to 1,195 by the union
+  freeze (vs v3+v5 train, 27 Nov 2026) and the cleaned val is 1,040 —
+  these are the v5 evaluation sets built during the v5 audit
   (`audit-v5/`), not dataset versions — they do not change the splits
   above.

@@ -6,19 +6,19 @@ This directory contains the production components of the SENTINEL system.
 
 ```
 src/
-├── backend/            # FastAPI asynchronous web server & WebSocket broadcaster
-│   ├── main.py         # Application entry point
-│   ├── database.py     # SQLite + SQLAlchemy models & migrations
-│   └── routers/        # API endpoints (incidents, health, streaming)
+├── backend/            # FastAPI demo console server (app.py, runner.py, schemas.py)
+│   ├── main.py         # [FYP-II] Application entry point
+│   ├── database.py     # [FYP-II] SQLite + SQLAlchemy models & migrations
+│   └── routers/        # [FYP-II] API endpoints (incidents, health, streaming)
 │
-├── frontend/           # React + Vite surveillance dashboard
-│   ├── src/            # Components, hooks, Canvas renderers, state management
+├── frontend/           # Vanilla HTML/CSS/JS console (app.js, index.html, styles.css)
+│   ├── src/            # [FYP-II] React + Vite: components, hooks, Canvas renderers
 │   └── index.html      # SPA root with Canvas mount point
 │
 └── pipeline/           # Shared AI & Video processing engine
     ├── capture.py      # Threaded OpenCV RTSP / Webcam video capture
     ├── weapon_detector.py # YOLOv8s inference wrapper
-    ├── pose_extractor.py  # YOLOv8m-Pose feature extractor
-    ├── action_classifier.py # LSTM temporal classifier
+    ├── pose_extractor.py  # [FYP-II] YOLOv8m-Pose feature extractor
+    ├── action_classifier.py # [FYP-II] LSTM temporal classifier
     └── temporal_buffer.py # Deque-based IoU sliding window false-alarm filter
 ```

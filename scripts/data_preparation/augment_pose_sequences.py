@@ -226,9 +226,32 @@ def main() -> None:
                 logger.warning("Directory does not exist: %s", class_dir)
                 continue
 
-            dir_stats = augment_directory(class_dir, target_count=split_target)
-            overall_stats[split_name][class_name] = dir_stats["total"]
-            total_augmented += dir_stats["total"]
+            if split_name == "train":
+                dir_stats = augment_directory(
+                    class_dir, target_count=split_target
+                )
+                overall_stats[split_name][class_name] = dir_stats["total"]
+                total_augmented += dir_stats["total"]
+            else:
+                # Val/test are NEVER augmented: writing _flipped /
+                # _jitter copies there inflates the FYP-II evaluation
+                # sets with near-duplicates of the same sequences
+                # (and leaks augmented variants into the split that
+                # tunes the model). Count the base files only; the
+                # audit below still checks every file. Any _flipped /
+                # _jitter files already in val/test from an earlier
+                # run must be deleted by hand — this script will not
+                # remove data.
+                base_count = len(
+                    [
+                        f
+                        for f in class_dir.glob("*.npy")
+                        if not f.stem.endswith("_flipped")
+                        and not f.stem.endswith("_jitter")
+                    ]
+                )
+                overall_stats[split_name][class_name] = base_count
+                total_augmented += base_count
 
             # Sanity audit all files in class_dir
             for npy_file in class_dir.glob("*.npy"):

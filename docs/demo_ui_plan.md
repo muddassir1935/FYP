@@ -114,13 +114,13 @@ never blocks the event loop on inference (PROJECT_CONTEXT §7.2).
 | `GET /api/weights` | List available weights | `[{id, kind: "pytorch"\|"openvino", label}]` — a bare JSON list; there is no `path` field (weights are addressed by `id` only, and the server never reveals filesystem paths). `.pt` files + `*_openvino_model` dirs. |
 | `GET /api/defaults` | Shipped operating point | `{conf_gun: 0.44, conf_knife: 0.43, conf_fallback: 0.40}` from `src/pipeline/thresholds.py`; the frontend fills its threshold inputs from here instead of hardcoding them. |
 | `POST /api/upload` | Upload a video clip | Multipart; saved to `videos/uploads/`; size cap 500 MB; only video extensions. Probed with OpenCV at upload time and rejected with 400 (file deleted) when not a playable video — extension alone is no longer enough. |
-| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, loop, hide_unconfirmed, save_video, tracker, record_raw}`. `tracker` defaults to `bytetrack.yaml`; `record_raw` defaults to `true` (records the raw un-annotated frames; `false` records the annotated video as before). Enters `starting` while loading/warming up the detector. 409 if a run is already starting/running/paused. |
+| `POST /api/run/start` | Start a run | Body: `{source_type, source, weights_id, conf_gun, conf_knife, imgsz, min_hits, confirm_window_s, confirm_min_span_s, loop, hide_unconfirmed, save_video, tracker, record_raw}`. `tracker` defaults to `bytetrack.yaml`; `record_raw` defaults to `true` (records the raw un-annotated frames; `false` records the annotated video as before). Enters `starting` while loading/warming up the detector. 409 if a run is already starting/running/paused. |
 | `POST /api/run/pause` | Pause the active run | Holds video file position (or freezes webcam display), pauses inference and elapsed timer, keeps `/api/stream` alive. 409 if not running. |
 | `POST /api/run/resume` | Resume a paused run | Resumes from the paused position and timer. 409 if not paused. |
 | `POST /api/run/stop` | Stop the run | Idempotent (works from running or paused); returns the final stats. Also works while `starting`: cancels the start (the loader checks the flag after each slow step). |
 | `GET /api/run/status` | Run state + live stats | `{state: idle\|starting\|running\|paused\|stopping\|stopped\|error, source, weights, display_fps, detect_fps, frames, detections, confirmed, elapsed_s, error, warning}`. `starting` and `stopping` are transient (entering/exiting a run); `paused` holds the run. `warning` carries non-fatal problems (Intel GPU compile fallback, failed video recording); `saved_video` ends `_raw.mp4` when the recording is raw. |
 | `GET /api/stream` | MJPEG annotated stream | `multipart/x-mixed-replace`; active during `running` and `paused` (holds last frame when paused); 503 with a JSON body otherwise. |
-| `GET /api/snapshots` | List snapshots (newest first) | `{snapshots: [{file, class, track, timestamp, url}]}` — parsed from filenames. |
+| `GET /api/snapshots` | List snapshots (newest first) | `[{file, class, track, timestamp, url}]` — a bare JSON list, parsed from filenames. |
 | `GET /snapshots/{file}` | Serve one snapshot image | Path-traversal guarded (name must be inside the snapshots dir). Serves only files matching `threat_<Gun|Knife>_<stamp>_t<track>.jpg` (same regex as the listing); any other `.jpg` in the dir is a 404. |
 | `POST /api/snapshots/clear` | Delete all snapshots | For a clean demo start. Asks for confirmation in the UI. |
 
@@ -359,7 +359,7 @@ this; the factory form (`main_app`) has no server to signal.
   back to "Run stopped." during polling and frame 1 of the video runs at
   full detect FPS. Warmed detectors are cached in `DemoRunner` by
   `(weights_path, imgsz, device)` so consecutive runs start immediately;
-  for OpenVINO directories, `xpu` is auto-selected when available
+  for OpenVINO directories, `intel:gpu` is auto-selected when available
   (with automatic CPU fallback) and `OPENVINO_CACHE_DIR` points to
   `models/weights/.ov_cache`.
 - **D13 — explicit Pause / Resume endpoints:** `POST /api/run/pause` and

@@ -19,7 +19,11 @@ real-time threat detection?*
 > confirmed-alarm precision while the v4 live field test says 18.5%: they
 > measure different confirmation logic in different regimes, not just
 > different data. A direct ByteTrack-vs-buffer comparison
-> (`scripts/evaluation/compare_tracking_vs_buffer.py`) has not been run yet.
+> (`scripts/evaluation/compare_tracking_vs_buffer.py`) HAS now been run
+> (27 Nov 2026 sweep, tuned point Gun 0.47 / Knife 0.43, window 1.0 s,
+> span 0.30 s, min_hits 5, on holdout + calibration clips): tracker
+> 21/26 intervals + 19 FP events vs buffer 21/26 + 22 FPs — a tie on
+> recall, tracker ahead by 3 FPs. The demo stays on the tracker.
 
 ## Protocol (identical for v2 and v3)
 

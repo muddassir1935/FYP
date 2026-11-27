@@ -208,6 +208,73 @@ class LoggingTestCase(unittest.TestCase):
         self.assertIn("ended_at", footer)
         self.assertGreaterEqual(footer["duration_s"], 0)
 
+    def test_footer_duration_excludes_paused_time(self) -> None:
+        # The footer must agree with RunInfo.elapsed_s: paused time is
+        # not run time, or false-alarms/hour comes out too low after
+        # any pause during a Session A run.
+        log = _DetectionLog(
+            self.logs,
+            detector=FakeDetector(self.weights, script=[]),
+            voter=TrackClassVoter(min_hits=3),
+            tracker="bytetrack.yaml",
+        )
+        time.sleep(0.02)
+        log.pause()
+        time.sleep(0.3)
+        log.resume()
+        log.close(frames_processed=0, frames_seen_by_capture=0)
+        assert log.path is not None
+        lines = [
+            json.loads(line)
+            for line in log.path.read_text().splitlines()
+            if line.strip()
+        ]
+        footer = lines[-1]
+        self.assertEqual(footer["type"], "run_summary")
+        # ~0.02 s of live time; the 0.3 s pause must not be in it.
+        self.assertLess(footer["duration_s"], 0.2)
+
+    def test_footer_duration_excludes_in_progress_pause(self) -> None:
+        # Closing while still paused (e.g. stop() on a paused run)
+        # must count the open pause interval too.
+        log = _DetectionLog(
+            self.logs,
+            detector=FakeDetector(self.weights, script=[]),
+            voter=TrackClassVoter(min_hits=3),
+            tracker="bytetrack.yaml",
+        )
+        time.sleep(0.02)
+        log.pause()
+        time.sleep(0.3)
+        log.close(frames_processed=0, frames_seen_by_capture=0)
+        assert log.path is not None
+        lines = [
+            json.loads(line)
+            for line in log.path.read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertLess(lines[-1]["duration_s"], 0.2)
+
+    def test_worker_pause_forwards_to_log(self) -> None:
+        # InferenceWorker.pause()/resume() must reach the log, or the
+        # footer fix above never sees a pause.
+        stream = FakeStream(0, self.frame)
+        worker = InferenceWorker(
+            stream,
+            FakeDetector(self.weights, script=[]),
+            TrackClassVoter(min_hits=3),
+            cv2_module=MagicMock(),
+            tracker="bytetrack.yaml",
+            snapshots_dir=self.snaps,
+            log_dir=self.logs,
+        )
+        assert worker._log is not None
+        worker.pause()
+        time.sleep(0.05)
+        worker.resume()
+        self.assertGreater(worker._log._paused_total_s, 0.03)
+        worker.stop()
+
     def test_footer_zero_counts_when_worker_never_started(self) -> None:
         # stop() on a never-started worker closes the log: the footer
         # is still written (a run that never started processed 0 frames).

@@ -12,7 +12,7 @@
 
 ## 📌 Executive Summary
 
-**SENTINEL** is an intelligent, real-time edge surveillance system engineered to overcome human cognitive fatigue in CCTV monitoring. Human monitoring accuracy drops sharply over a shift [citation needed], and SENTINEL is built to watch without tiring. **As of FYP-I (Nov 2026), the weapon-detection stream is live**: the YOLOv8s detector runs at **≥25 FPS** on the demo laptop (Intel Iris Xe via OpenVINO — 39 FPS inference, ~30 FPS end-to-end), autonomously detecting guns and knives. The behavior stream (pose + LSTM classification of violent interactions) is dataset-ready — 3,579 pose sequences — but the model itself is FYP-II work, as are email alerts and the React dashboard.
+**SENTINEL** is an intelligent, real-time edge surveillance system engineered to overcome human cognitive fatigue in CCTV monitoring. Human vigilance fades over a long shift, and SENTINEL is built to watch without tiring. **As of FYP-I (Nov 2026), the weapon-detection stream is live**: the YOLOv8s detector runs at **≥25 FPS** on the demo laptop (Intel Iris Xe via OpenVINO — 39 FPS inference, ~30 FPS end-to-end), autonomously detecting guns and knives. The behavior stream (pose + LSTM classification of violent interactions) is dataset-ready — 3,579 pose sequences — but the model itself is FYP-II work, as are email alerts and the React dashboard.
 
 Unlike traditional systems that rely on slow, compute-heavy 3D-CNNs or single-frame weapon detectors that cause false alarms, SENTINEL introduces a **Dual-Stream Architecture** combining:
 1. **Spatial Stream (Weapon Detection)**: Fine-tuned **YOLOv8s** for rapid identification of guns and knives.
@@ -109,8 +109,8 @@ FYP/
 │   └── inference/                  # FPS benchmarks & standalone test runners
 │
 ├── src/                            # Core production codebase
-│   ├── backend/                    # FastAPI server, WebSockets, SQLite ORM
-│   ├── frontend/                   # React + Vite surveillance dashboard
+│   ├── backend/                    # FastAPI server + MJPEG stream (WebSockets, SQLite incident log: [FYP-II])
+│   ├── frontend/                   # Vanilla HTML/CSS/JS console (React + Vite dashboard: [FYP-II])
 │   └── pipeline/                   # OpenCV capture, AI models, Temporal Buffer
 │
 └── Literature Review/              # Academic deliverables
@@ -151,15 +151,21 @@ python -m venv venv
 source venv/bin/activate
 
 pip install --upgrade pip
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-pip install ultralytics fastapi uvicorn[standard] opencv-python sqlalchemy websockets
+pip install -r requirements.txt
+# CPU-only torch (PyTorch CPU index), ultralytics 8.4.208 and openvino are
+# pinned in requirements.txt. On a CUDA machine, install torch for your
+# CUDA version from pytorch.org first, then install the rest.
 ```
 
-### 3. Frontend Setup
+### 3. Demo console (no build step)
+
+The console is vanilla HTML/CSS/JS (3 files in `src/frontend/`) — there
+is no `package.json`, no React, no Vite, nothing to build; the React
+dashboard is FYP-II work. Start it from the repo root (see
+[Demo Web UI](#-demo-web-ui-fyp-i) below):
+
 ```bash
-cd src/frontend
-npm install
-npm run dev
+python scripts/run_demo_ui.py
 ```
 
 ---

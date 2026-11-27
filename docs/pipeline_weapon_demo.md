@@ -41,18 +41,20 @@ python scripts/inference/run_weapon_demo.py                      # webcam 0
 python scripts/inference/run_weapon_demo.py --source demo.mp4    # video file
 python scripts/inference/run_weapon_demo.py --source demo.mp4 --loop   # file loops instead of exiting at the end
 python scripts/inference/run_weapon_demo.py --source rtsp://...  # RTSP stream
-python scripts/inference/run_weapon_demo.py --conf 0.35 --hits 6 --window 10
+python scripts/inference/run_weapon_demo.py --conf 0.35 --min-hits 5 --confirm-window 1.0 --confirm-min-span 0.3
 ```
 
-Controls: `q` quit, `r` reset the temporal buffer.
+Controls: `q` quit, `r` reset the tracker and class voter.
 
-- Unconfirmed detections draw as thin green boxes; a **confirmed** threat
-  (seen in at least `--hits` of the last `--window` frames) draws as a thick
-  red box labelled `CONFIRMED h/window`.
+- Unconfirmed detections draw as thin gray boxes; a **confirmed** threat
+  (a track with at least `--min-hits` sightings inside
+  `--confirm-window` seconds, spanning at least `--confirm-min-span`
+  seconds) draws as a thick red box labelled `CONFIRMED`.
 - On confirmation, an annotated snapshot is saved to `snapshots/`
   (5-second cooldown per tracked object) and an `[ALERT]` line is printed.
-- `--save-video out.mp4` records the annotated stream; `--no-snapshots`
-  disables snapshot saving.
+- `--save-video out.mp4` records the RAW (un-annotated) frames by
+  default; `--no-record-raw` records the annotated video instead.
+  `--no-snapshots` disables snapshot saving.
 
 ## Faster inference on Intel machines (OpenVINO)
 
@@ -69,9 +71,11 @@ python scripts/inference/run_weapon_demo.py --weights models/weights/best_openvi
 ```
 
 The export script self-checks the exported model and prints an approximate
-blank-frame FPS for the machine it ran on. On recent ultralytics versions,
-adding `--device xpu` to the demo selects the integrated GPU
-explicitly. RTX/NVIDIA demo machines keep using the `.pt` file — no export
+blank-frame FPS for the machine it ran on. For OpenVINO model folders
+the demo auto-selects `intel:gpu` when an Intel GPU is available (with
+automatic CPU fallback if compilation fails). `--device xpu` does NOT
+work — ultralytics rejects it (it crashes on both 8.4.208 and 8.4.215),
+so never pass it. RTX/NVIDIA demo machines keep using the `.pt` file — no export
 needed there.
 
 **Measured on the dev laptop (Intel hybrid CPU + Iris Xe, 2026-11-09,
@@ -88,10 +92,13 @@ was a cold PyTorch run through the full demo pipeline.
 
 ## Tuning knobs
 
-- `--conf` — detector confidence threshold (demo default **0.40**). At
-  0.25 the model emits many background false alarms (see the error
-  analysis in `docs/training_run_log.md`); 0.40 sits near its best
-  operating point. Lower = more sensitive, more false alarms.
+- `--conf` / `--conf-gun` / `--conf-knife` — detector confidence
+  thresholds. The shipped per-class operating point is Gun **0.44** /
+  Knife **0.43** (from `src/pipeline/thresholds.py`); `--conf` on its
+  own sets a single threshold for all classes, and the generic fallback
+  is **0.40**. At 0.25 the model emits many background false alarms (see the error
+  analysis in `docs/training_run_log.md`); the shipped point sits near
+  its best operating point. Lower = more sensitive, more false alarms.
 - `--hide-unconfirmed` — draw only FR-05-confirmed threats; raw
   unconfirmed detections (thin gray boxes by default) are hidden.
 - `--display-width` / `--display-height` — maximum on-screen window size
@@ -99,8 +106,9 @@ was a cold PyTorch run through the full demo pipeline.
   recordings and snapshots always keep the source's native resolution.
 - `--imgsz` — inference image size (default 640). Smaller values (416, 320)
   run much faster on CPU-only machines, at a small accuracy cost.
-- `--hits` / `--window` — stricter (e.g. 8/12) = fewer false alerts, slower
-  confirmation; looser (e.g. 4/10) = faster alerts, more false positives.
+- `--min-hits` / `--confirm-window` / `--confirm-min-span` — stricter
+  (e.g. 5 hits in 1.0 s spanning >= 0.3 s) = fewer false alerts, slower
+  confirmation; looser (e.g. 3 hits in 1.0 s) = faster alerts, more false positives.
 
 ## Notes
 

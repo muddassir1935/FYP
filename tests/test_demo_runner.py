@@ -121,6 +121,21 @@ class TestListings(RunnerTestCase):
         self.assertTrue((self.snaps / "keep.jpg").is_file())
         self.assertEqual(self.runner.list_snapshots(), [])
 
+    def test_clear_snapshots_resets_run_start_baseline(self) -> None:
+        # status() reports len(snapshots) - _snapshots_at_start: without
+        # the reset, clearing mid-run would silence gallery updates +
+        # the siren for the next N threats (one per snapshot that
+        # existed when the run started).
+        self.snaps.mkdir(exist_ok=True)
+        for i in range(3):
+            (self.snaps / f"threat_Gun_20261121_12000{i}_t{i}.jpg").write_bytes(b"x")
+        self.runner._snapshots_at_start = 3
+        self.assertEqual(self.runner.clear_snapshots(), 3)
+        self.assertEqual(self.runner._snapshots_at_start, 0)
+        # A snapshot saved after the clear counts from zero again.
+        (self.snaps / "threat_Knife_20261121_130000_t9.jpg").write_bytes(b"x")
+        self.assertEqual(self.runner.status().snapshots, 1)
+
 
 class TestValidation(RunnerTestCase):
     def test_unknown_weights_rejected(self) -> None:

@@ -142,6 +142,12 @@ class _DetectionLog:
             timespec="seconds"
         )
         self._started_monotonic = time.monotonic()
+        # Paused time (monotonic): the footer duration_s must exclude
+        # it, like RunInfo.elapsed_s does — otherwise a pause during
+        # a Session A / FA-per-hour run inflates the run length and
+        # deflates the computed false-alarms/hour.
+        self._paused_total_s = 0.0
+        self._pause_started: float | None = None
         self._source = source
         self._recording = recording
         try:
@@ -254,6 +260,26 @@ class _DetectionLog:
         except Exception as exc:
             self._fail(f"flush failed: {exc}")
 
+    def pause(self) -> None:
+        """Start counting paused time (idempotent while paused)."""
+        if self._pause_started is None:
+            self._pause_started = time.monotonic()
+
+    def resume(self) -> None:
+        """Stop counting paused time; bank the interval."""
+        if self._pause_started is not None:
+            self._paused_total_s += max(
+                0.0, time.monotonic() - self._pause_started
+            )
+            self._pause_started = None
+
+    def _paused_s(self) -> float:
+        """Paused seconds so far, including an in-progress pause."""
+        total = self._paused_total_s
+        if self._pause_started is not None:
+            total += max(0.0, time.monotonic() - self._pause_started)
+        return total
+
     def close(
         self,
         *,
@@ -287,7 +313,10 @@ class _DetectionLog:
                 "started_at": self._started_at,
                 "ended_at": ended_at,
                 "duration_s": round(
-                    time.monotonic() - self._started_monotonic, 3
+                    time.monotonic()
+                    - self._started_monotonic
+                    - self._paused_s(),
+                    3,
                 ),
             }
             try:
@@ -402,9 +431,13 @@ class InferenceWorker(threading.Thread):
 
     def pause(self) -> None:
         self._paused_event.set()
+        if self._log is not None:
+            self._log.pause()
 
     def resume(self) -> None:
         self._paused_event.clear()
+        if self._log is not None:
+            self._log.resume()
 
     @property
     def paused(self) -> bool:
@@ -554,7 +587,7 @@ class InferenceWorker(threading.Thread):
         fresh = [
             cd
             for cd in confirmed
-            if now - self._last_snapshot_at.get(cd.track_id, 0.0)
+            if now - self._last_snapshot_at.get(cd.track_id, -float("inf"))
             >= SNAPSHOT_COOLDOWN_SECONDS
         ]
         if not fresh:
