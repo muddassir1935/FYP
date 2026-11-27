@@ -652,8 +652,18 @@ class TestShippedIntervalsFile(unittest.TestCase):
             / "scripts/evaluation/holdout_intervals.json"
         )
 
-    def test_sixteen_clips(self) -> None:
-        self.assertEqual(len(self.doc["clips"]), 16)
+    def test_seventeen_clips(self) -> None:
+        self.assertEqual(len(self.doc["clips"]), 17)
+
+    def test_qaim_pistol_gun_intervals(self) -> None:
+        by_clip = {c["clip"]: c for c in self.doc["clips"]}
+        qaim = by_clip["qaim-pistol"]
+        self.assertEqual(qaim["class"], "Gun")
+        self.assertEqual(qaim["gt_positive_frames"], 220)
+        self.assertEqual(len(qaim["intervals"]), 4)
+        for start, end in qaim["intervals"]:
+            self.assertGreaterEqual(start, 0.0)
+            self.assertLessEqual(end, qaim["duration_s"])
 
     def test_knife_intervals_inside_durations(self) -> None:
         by_clip = {c["clip"]: c for c in self.doc["clips"]}
